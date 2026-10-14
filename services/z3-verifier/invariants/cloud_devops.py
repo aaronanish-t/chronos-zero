@@ -111,8 +111,11 @@ def evaluate_cloud_devops_invariants(
         for r_id, expr in tracked_rules:
             s.push()
             s.assert_and_track(expr, r_id)
-            if s.check() == unsat:
-                failed_ids.extend([str(c) for c in s.unsat_core()])
+            result = s.check()
+            if result == unsat:
+                failed_ids.extend([str(c) for c in s.unsat_core()] or [r_id])
+            elif result == unknown:  # 50 ms timeout: fail closed
+                failed_ids.append(r_id)
             s.pop()
 
         # Add all rules for SMT2 dump
@@ -151,7 +154,7 @@ def evaluate_cloud_devops_invariants(
         status = "UNSAT"
         smt2_str = ""
         violated.append({
-            "rule_id": "STATE_ERROR",
+            "rule_id": "INV_SYS_00_MALFORMED_STATE",
             "formal_assertion": "valid_state_delta",
             "counterexample": str(e),
             "remediation_hint": f"Malformed state payload rejected: {str(e)}",

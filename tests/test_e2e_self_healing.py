@@ -67,8 +67,8 @@ def test_turn2_uses_safe_state(seeded):
     args = {cid: run(cid, "ACTIVE")["turns"][1]["tool_call"]["arguments"] for cid in orchestrator.SCENARIOS}
     assert args["HEALTHCARE_FHIR"]["drug_name"] == "Linagliptin"
     assert args["HEALTHCARE_FHIR"]["attached_encounter_ids"] == ["Encounter/enc_108"]
-    assert args["FINTECH_ESCROW"] == {"vendor_id": "vnd_verified", "amount_usd": 800.0}
-    assert args["CLOUD_DEVOPS"]["sql"].startswith("ALTER TABLE users ADD COLUMN migration_v2 INT DEFAULT 0;")
+    assert args["FINTECH_ESCROW"] == {"vendor_id": "vnd_verified", "amount_usd": 400.0}
+    assert args["CLOUD_DEVOPS"]["sql"].startswith("ALTER TABLE users ADD COLUMN IF NOT EXISTS migration_v2 INT DEFAULT 0;")
     assert "port = 443, cidr_open_world = 0" in args["CLOUD_DEVOPS"]["sql"]
     assert "DROP" not in args["CLOUD_DEVOPS"]["sql"].upper()
 

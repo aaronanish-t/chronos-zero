@@ -35,6 +35,20 @@ def database_name(cartridge_id: str) -> str:
     return f"chronos_{cartridge_id.lower()}"
 
 
+async def _rollback_and_return(pool: AsyncConnectionPool, conn: AsyncConnection) -> None:
+    """Roll back and hand the connection back, even if the rollback itself fails.
+
+    A failed rollback (broken socket, server restart) must not leak the connection out of the
+    pool; putconn() discards broken connections and rolls back any it finds mid-transaction.
+    """
+    try:
+        await conn.rollback()
+    except Exception:
+        pass
+    finally:
+        await pool.putconn(conn)
+
+
 async def _configure(conn: AsyncConnection) -> None:
     await conn.set_isolation_level(IsolationLevel.REPEATABLE_READ)
     # Lock/statement bounds (AGENTS.md §4.1) set once per pooled connection rather than per
@@ -65,8 +79,7 @@ class CoWBranchEngine:
             await pool.open(wait=False)
 
     async def close(self) -> None:
-        for branch_id in list(self._pinned):
-            await self.resolve(branch_id, commit=False)
+        await self.rollback_all()
         for pool in self._pools.values():
             await pool.close()
 
@@ -93,8 +106,7 @@ class CoWBranchEngine:
             if overlays:
                 state_post.update(overlays)
         except BaseException:
-            await conn.rollback()
-            await pool.putconn(conn)
+            await _rollback_and_return(pool, conn)
             raise
 
         self._pinned[branch_id] = (cartridge_id, conn)
@@ -114,7 +126,10 @@ class CoWBranchEngine:
             else:
                 await conn.rollback()
         except BaseException:
-            await conn.rollback()  # e.g. 40001 on COMMIT: the branch is rejected
+            try:
+                await conn.rollback()  # e.g. 40001 on COMMIT: the branch is rejected
+            except Exception:
+                pass  # surface the original error; putconn() below discards a broken connection
             raise
         finally:
             # Returned only after COMMIT/ROLLBACK, never mid-transaction.
@@ -151,7 +166,10 @@ class CoWBranchEngine:
                 state_post.update(overlays)
             await conn.commit()
         except BaseException:
-            await conn.rollback()
+            try:
+                await conn.rollback()
+            except Exception:
+                pass
             raise
         finally:
             await pool.putconn(conn)
@@ -165,6 +183,8 @@ class CoWBranchEngine:
                 await self.resolve(branch_id, commit=False)
             except KeyError:
                 pass  # resolved concurrently
+            except Exception:
+                pass  # resolve() already returned the connection; keep releasing the rest
         return len(branch_ids)
 
     async def create_disposable_copy(self, cartridge_id: str) -> str:

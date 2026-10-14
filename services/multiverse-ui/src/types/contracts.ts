@@ -16,15 +16,18 @@ export type CartridgeId = "HEALTHCARE_FHIR" | "FINTECH_ESCROW" | "CLOUD_DEVOPS";
 
 export type ChronosMode = "ACTIVE" | "BYPASS";
 
-export type Z3Status = "SAT" | "UNSAT" | "TIMEOUT" | "ERROR";
+// Contract 3 status is locked to SAT | UNSAT (AGENTS.md section 3): the verifier fails closed to UNSAT.
+export type Z3Status = "SAT" | "UNSAT";
 
-export type NodeZ3Verdict = "SAT" | "UNSAT" | "TIMEOUT" | "ERROR" | "NONE";
+// Contract 4 node.z3_verdict (contracts/ws_telemetry.schema.json).
+export type NodeZ3Verdict = "SAT" | "UNSAT" | "BYPASS" | "N/A";
 
+// Contract 4 node.branch_type. SYSTEM_EVENT carries DEMO_RESET.
 export type BranchType =
-  | "ROOT"
   | "SHADOW_REJECTED"
   | "COMMITTED_SAFE"
-  | "BYPASS_CORRUPTED";
+  | "BYPASS_CORRUPTED"
+  | "SYSTEM_EVENT";
 
 export type TelemetryEventType =
   | "BRANCH_EVALUATED"
@@ -89,9 +92,10 @@ export interface Z3VerdictPayload {
 // Contract 4: WebSocket UI Telemetry Event
 // ==========================================
 
-export interface TelemetryNode {
+// Exactly the Contract 4 node, as the kernel sends it.
+export interface TelemetryNodePayload {
   id: string;
-  parent_id: string | null;
+  parent_id: string;
   branch_type: BranchType;
   action_label: string;
   total_latency_ms: number;
@@ -99,25 +103,58 @@ export interface TelemetryNode {
   violated_rules: string[];
   financial_loss_prevented_usd: number;
   clinical_hazard_prevented: boolean;
-  // Extended fields for inspection / proof drawer UI
-  cow_fork_latency_ms?: number;
-  proof_latency_ms?: number;
-  smt2_dump?: string;
-  sha256_proof_hash?: string;
-  violated_invariants?: ViolatedInvariant[];
-  tool_call?: ToolCall;
-  remediation_hint?: string;
-  state_pre?: Record<string, unknown>;
-  state_post_shadow?: Record<string, unknown>;
-  timestamp?: number;
-  [key: string]: unknown;
 }
 
 export interface TelemetryEvent {
   event_type: TelemetryEventType;
   trace_id: string;
   cartridge_id: CartridgeId;
-  node: TelemetryNode;
+  node: TelemetryNodePayload;
+}
+
+// UI-side DAG node: a Contract 4 node plus proof details merged in from the matching
+// Contract 3 verdict (node id == "node_" + shadow_branch_id). "ROOT" is the UI's own
+// session-origin node and never appears on the wire.
+export interface TelemetryNode extends Omit<TelemetryNodePayload, "branch_type"> {
+  branch_type: BranchType | "ROOT";
+  cartridge_id?: CartridgeId;
+  trace_id?: string;
+  proof_latency_ms?: number;
+  smt2_dump?: string;
+  sha256_proof_hash?: string;
+  violated_invariants?: ViolatedInvariant[];
+  tool_call?: ToolCall;
+  agent_source?: string;
+  timestamp?: number;
+  [key: string]: unknown;
+}
+
+const CARTRIDGE_IDS: readonly string[] = ["HEALTHCARE_FHIR", "FINTECH_ESCROW", "CLOUD_DEVOPS"];
+const EVENT_TYPES: readonly string[] = ["BRANCH_EVALUATED", "BYPASS_CORRUPTED", "POLICY_COMPILED", "DEMO_RESET"];
+const BRANCH_TYPES: readonly string[] = ["SHADOW_REJECTED", "COMMITTED_SAFE", "BYPASS_CORRUPTED", "SYSTEM_EVENT"];
+const NODE_VERDICTS: readonly string[] = ["SAT", "UNSAT", "BYPASS", "N/A"];
+
+/** Runtime Contract 4 check: the DAG only ever renders events that match the schema. */
+export function isTelemetryEvent(value: unknown): value is TelemetryEvent {
+  if (typeof value !== "object" || value === null) return false;
+  const e = value as Record<string, unknown>;
+  const n = e.node as Record<string, unknown> | undefined;
+  return (
+    EVENT_TYPES.includes(e.event_type as string) &&
+    typeof e.trace_id === "string" &&
+    CARTRIDGE_IDS.includes(e.cartridge_id as string) &&
+    typeof n === "object" &&
+    n !== null &&
+    typeof n.id === "string" &&
+    typeof n.parent_id === "string" &&
+    BRANCH_TYPES.includes(n.branch_type as string) &&
+    typeof n.action_label === "string" &&
+    typeof n.total_latency_ms === "number" &&
+    NODE_VERDICTS.includes(n.z3_verdict as string) &&
+    Array.isArray(n.violated_rules) &&
+    typeof n.financial_loss_prevented_usd === "number" &&
+    typeof n.clinical_hazard_prevented === "boolean"
+  );
 }
 
 // ==========================================
@@ -129,7 +166,7 @@ export interface AuditEntry {
   trace_id: string;
   shadow_branch_id: string;
   status: string;
-  timestamp_ns: number;
+  timestamp_ns: string; // kept as digits: nanoseconds exceed Number.MAX_SAFE_INTEGER
   smt2_dump: string;
   prev_hash: string;
   entry_hash: string;
@@ -218,7 +255,49 @@ export interface KernelResetResponse {
   seed_ms: number;
   rolled_back_branches: number;
   sandboxes_dropped: number;
-  archived_audit_chain: string;
+  archived_audit_chain: string | null;
+}
+
+// ==========================================
+// Agent Orchestrator (POST /v1/agent/run-scenario on :8002, E3)
+// ==========================================
+
+export interface RunScenarioRequest {
+  cartridge_id: CartridgeId;
+  chronos_mode: ChronosMode;
+  custom_prompt?: string | null;
+}
+
+export interface ScenarioTurn {
+  turn: number;
+  tool_call: ToolCall;
+  agent_source: string;
+  // ACTIVE: a Contract 3 verdict. BYPASS: the kernel's unverified result (no status field).
+  verdict: Partial<Z3VerdictPayload> & Record<string, unknown>;
+}
+
+export interface RunScenarioResponse {
+  trace_id: string;
+  cartridge_id: CartridgeId;
+  chronos_mode: ChronosMode;
+  turns: ScenarioTurn[];
+  self_healed: boolean;
+}
+
+// ==========================================
+// Z3 Policy Studio (POST /v1/z3/compile-policy on :8001, E2)
+// ==========================================
+
+export interface PolicyCompileResponse {
+  status: "COMPILED" | "ERROR";
+  cartridge_id: string;
+  rule_id: string;
+  formal_assertion: string;
+  compiled_code?: string | null;
+  smt2_dump?: string | null;
+  compilation_latency_ms?: number | null;
+  remediation_hint?: string | null;
+  message: string;
 }
 
 

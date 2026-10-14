@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import {
   Code2,
   Sparkles,
@@ -8,273 +8,105 @@ import {
   Sliders,
   ChevronUp,
   ChevronDown,
-  Terminal,
   Copy,
   Check,
-  Zap,
   ShieldCheck,
   Cpu,
-  Layers,
-  FileCode,
-  Send,
+  AlertTriangle,
 } from "lucide-react";
-import { CartridgeId } from "../types/contracts";
+import { CartridgeId, PolicyCompileResponse } from "../types/contracts";
+import type { ActivePolicy } from "../hooks/useChronosWS";
 
 interface LivePolicyStudioProps {
   activeCartridge: CartridgeId;
+  activePolicy: ActivePolicy | null;
+  onPolicyCompiled: (policy: ActivePolicy) => void;
 }
 
 interface CompiledRuleOutput {
   ruleId: string;
+  cartridge: CartridgeId;
   nl: string;
   pythonZ3: string;
   smt2: string;
   remediationHint: string;
-  compileLatencyMs: number;
-  timestamp: string;
+  compileLatencyMs: number | null;
 }
+
+// E3's judge policies (services/cartridges/scenarios/judge_policies.py): each is pre-recorded in
+// the offline replay cache and compiles on the verifier's deterministic (no-LLM) path.
+const JUDGE_PRESETS: { label: string; nl: string; cartridge: CartridgeId }[] = [
+  { label: "Wire cap $500", nl: "No single wire transfer may exceed $500.", cartridge: "FINTECH_ESCROW" },
+  { label: "SLA < 100 ms", nl: "Only pay vendors whose SLA latency is under 100 ms.", cartridge: "FINTECH_ESCROW" },
+  { label: "Metformin eGFR < 45", nl: "Never prescribe Metformin to a patient with eGFR below 45.", cartridge: "HEALTHCARE_FHIR" },
+  { label: "No DROP / TRUNCATE", nl: "Never drop or truncate a production table.", cartridge: "CLOUD_DEVOPS" },
+  { label: "No public SSH", nl: "SSH port 22 must never be open to the internet.", cartridge: "CLOUD_DEVOPS" },
+];
+
+const CARTRIDGE_TAG: Record<CartridgeId, string> = {
+  HEALTHCARE_FHIR: "MED",
+  FINTECH_ESCROW: "FIN",
+  CLOUD_DEVOPS: "OPS",
+};
 
 export const LivePolicyStudio: React.FC<LivePolicyStudioProps> = ({
   activeCartridge,
+  activePolicy,
+  onPolicyCompiled,
 }) => {
   const [isExpanded, setIsExpanded] = useState(true);
   const [customRule, setCustomRule] = useState("");
   const [activeTab, setActiveTab] = useState<"PYTHON_Z3" | "SMT2" | "HINT">("PYTHON_Z3");
   const [isCompiling, setIsCompiling] = useState(false);
-  const [compileStep, setCompileStep] = useState<string>("");
   const [compiledResult, setCompiledResult] = useState<CompiledRuleOutput | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const counterRef = useRef(0);
 
-  // Judge Q&A Quick-Presets
-  const judgePresets: { label: string; nl: string; cartridge: CartridgeId }[] = [
-    {
-      label: "Wire 2FA & Cap",
-      nl: "Block wire transfer > $25,000 without 2FA verification and allowlisted IBAN",
-      cartridge: "FINTECH_ESCROW",
-    },
-    {
-      label: "eGFR Nephrotoxicity",
-      nl: "Block NSAID prescription if patient eGFR is below 30 mL/min/1.73m²",
-      cartridge: "HEALTHCARE_FHIR",
-    },
-    {
-      label: "Prod Destructive DDL",
-      nl: "Deny DROP TABLE or TRUNCATE commands in production environment",
-      cartridge: "CLOUD_DEVOPS",
-    },
-    {
-      label: "Pending Dispute Escrow",
-      nl: "Block escrow release if vendor dispute flag is True",
-      cartridge: "FINTECH_ESCROW",
-    },
-    {
-      label: "Pediatric Acetaminophen",
-      nl: "Cap single pediatric dose at 15 mg/kg for patient age < 18 years",
-      cartridge: "HEALTHCARE_FHIR",
-    },
-    {
-      label: "Replica Lag SLA",
-      nl: "Prevent automated read traffic routing if replication lag exceeds 500ms",
-      cartridge: "CLOUD_DEVOPS",
-    },
-  ];
-
-  /**
-   * Natural Language to Formal Z3 SMT Compiler
-   * Synthesizes Python Z3 and SMT-LIB2 from plain English input
-   */
-  const compileNlToZ3 = (input: string): CompiledRuleOutput => {
-    const text = input.trim();
-    const lower = text.toLowerCase();
-    const randomSuffix = Math.floor(1000 + Math.random() * 9000).toString();
-    const compileLatencyMs = Number((140 + Math.random() * 190).toFixed(2));
-    const now = new Date().toLocaleTimeString();
-
-    // 1. Escrow / Wire / Financial Logic
-    if (lower.includes("wire") || lower.includes("transfer") || lower.includes("escrow") || lower.includes("$") || lower.includes("dispute")) {
-      const matchAmount = text.match(/\$?\s*(\d+([,\.]\d+)?)\s*(k|thousand|m|million)?/i);
-      let limit = 25000.0;
-      if (matchAmount) {
-        let val = parseFloat(matchAmount[1].replace(/,/g, ""));
-        if (matchAmount[3]?.toLowerCase().startsWith("k")) val *= 1000;
-        if (matchAmount[3]?.toLowerCase().startsWith("m")) val *= 1000000;
-        limit = val;
-      }
-      const has2fa = lower.includes("2fa") || lower.includes("auth") || lower.includes("two-factor");
-      const hasIban = lower.includes("iban") || lower.includes("allowlist") || lower.includes("whitelist");
-      const hasDispute = lower.includes("dispute");
-
-      const ruleId = `INV_LIVE_JUDGE_FIN_${randomSuffix}`;
-
-      let conditionZ3 = `transfer_usd <= ${limit.toFixed(1)}`;
-      let smtExpr = `(<= transfer_usd ${limit.toFixed(1)})`;
-
-      if (hasDispute) {
-        conditionZ3 = `Implies(transfer_usd > 0, dispute_open == False)`;
-        smtExpr = `(=> (> transfer_usd 0.0) (= dispute_open false))`;
-      } else if (has2fa && hasIban) {
-        conditionZ3 = `Implies(transfer_usd > ${limit.toFixed(1)}, And(user_2fa_verified == True, iban_allowlisted == True))`;
-        smtExpr = `(=> (> transfer_usd ${limit.toFixed(1)}) (and (= user_2fa_verified true) (= iban_allowlisted true)))`;
-      } else if (has2fa) {
-        conditionZ3 = `Implies(transfer_usd > ${limit.toFixed(1)}, user_2fa_verified == True)`;
-        smtExpr = `(=> (> transfer_usd ${limit.toFixed(1)}) (= user_2fa_verified true))`;
-      }
-
-      const pythonZ3 = `# Microsoft Z3 SMT Formal Invariant [Hot-Loaded Rule: ${ruleId}]
-# Input: "${text}"
-s.set("timeout", 50)  # Hard solver timeout (ms) per AGENTS.md 4.2
-s.assert_and_track(
-    ${conditionZ3},
-    "${ruleId}"
-)
-# Soundness: Formal Decidable Arithmetic (QF_LRA)`;
-
-      const smt2 = `; SMT-LIB2 Benchmark Dump (Compiled via Chronos-Zero Synthesizer)
-(set-logic QF_LRA)
-(declare-const transfer_usd Real)
-(declare-const user_2fa_verified Bool)
-(declare-const iban_allowlisted Bool)
-(declare-const dispute_open Bool)
-(assert (! ${smtExpr} :named ${ruleId}))
-(check-sat)`;
-
-      const remediationHint = `Violation of ${ruleId}: Wire transfer amount exceeds threshold or lacks secondary authorization. Clamp wire amount below $${limit.toLocaleString()} or verify 2FA token before dispatch.`;
-
-      return { ruleId, nl: text, pythonZ3, smt2, remediationHint, compileLatencyMs, timestamp: now };
-    }
-
-    // 2. Healthcare / FHIR / Medication / eGFR Logic
-    if (lower.includes("egfr") || lower.includes("prescription") || lower.includes("nsaid") || lower.includes("dose") || lower.includes("pediatric") || lower.includes("patient") || lower.includes("medication")) {
-      const matchEgfr = text.match(/egfr\s*(is)?\s*(below|<|<=)?\s*(\d+)/i);
-      const egfrLimit = matchEgfr ? parseFloat(matchEgfr[3]) : 30.0;
-      const isPediatric = lower.includes("pediatric") || lower.includes("age") || lower.includes("child");
-
-      const ruleId = `INV_LIVE_JUDGE_MED_${randomSuffix}`;
-
-      let conditionZ3 = `Implies(medication_is_nsaid == True, egfr_ml_min >= ${egfrLimit.toFixed(1)})`;
-      let smtExpr = `(=> (= medication_is_nsaid true) (>= egfr_ml_min ${egfrLimit.toFixed(1)}))`;
-
-      if (isPediatric) {
-        conditionZ3 = `Implies(patient_age_years < 18, single_dose_mg <= weight_kg * 15.0)`;
-        smtExpr = `(=> (< patient_age_years 18) (<= single_dose_mg (* weight_kg 15.0)))`;
-      }
-
-      const pythonZ3 = `# Microsoft Z3 SMT Formal Invariant [Hot-Loaded Rule: ${ruleId}]
-# Input: "${text}"
-s.set("timeout", 50)
-s.assert_and_track(
-    ${conditionZ3},
-    "${ruleId}"
-)
-# Clinical Safety: Deterministic Mathematical Nephrotoxicity Barrier`;
-
-      const smt2 = `; SMT-LIB2 Benchmark Dump (Compiled via Chronos-Zero Synthesizer)
-(set-logic QF_NRA)
-(declare-const medication_is_nsaid Bool)
-(declare-const egfr_ml_min Real)
-(declare-const patient_age_years Int)
-(declare-const single_dose_mg Real)
-(declare-const weight_kg Real)
-(assert (! ${smtExpr} :named ${ruleId}))
-(check-sat)`;
-
-      const remediationHint = isPediatric
-        ? `Violation of ${ruleId}: Pediatric dose exceeds 15 mg/kg weight limit. Adjust single_dose_mg to weight * 15.0 or substitute with safe pediatric liquid suspension.`
-        : `Violation of ${ruleId}: Renal contraindication detected (eGFR < ${egfrLimit} mL/min). Substitute NSAID with safe alternative (e.g. Acetaminophen 650mg).`;
-
-      return { ruleId, nl: text, pythonZ3, smt2, remediationHint, compileLatencyMs, timestamp: now };
-    }
-
-    // 3. DevOps / Cloud / DDL / Database Logic
-    if (lower.includes("drop") || lower.includes("truncate") || lower.includes("ddl") || lower.includes("table") || lower.includes("prod") || lower.includes("replica") || lower.includes("lag")) {
-      const ruleId = `INV_LIVE_JUDGE_OPS_${randomSuffix}`;
-      const isLag = lower.includes("lag") || lower.includes("replica");
-
-      const conditionZ3 = isLag
-        ? `Implies(replica_routing_weight > 0.0, replication_lag_ms <= 500.0)`
-        : `Not(And(is_production == True, contains_destructive_drop == True))`;
-
-      const smtExpr = isLag
-        ? `(=> (> replica_routing_weight 0.0) (<= replication_lag_ms 500.0))`
-        : `(not (and (= is_production true) (= contains_destructive_drop true)))`;
-
-      const pythonZ3 = `# Microsoft Z3 SMT Formal Invariant [Hot-Loaded Rule: ${ruleId}]
-# Input: "${text}"
-s.set("timeout", 50)
-s.assert_and_track(
-    ${conditionZ3},
-    "${ruleId}"
-)
-# Cloud DevOps: Zero-Tolerance Production DDL Destructive Lock`;
-
-      const smt2 = `; SMT-LIB2 Benchmark Dump (Compiled via Chronos-Zero Synthesizer)
-(set-logic QF_LRA)
-(declare-const is_production Bool)
-(declare-const contains_destructive_drop Bool)
-(declare-const replica_routing_weight Real)
-(declare-const replication_lag_ms Real)
-(assert (! ${smtExpr} :named ${ruleId}))
-(check-sat)`;
-
-      const remediationHint = isLag
-        ? `Violation of ${ruleId}: Replica lag exceeds 500ms SLA. Route read traffic to primary instance until replication catches up.`
-        : `Violation of ${ruleId}: Destructive DROP/TRUNCATE executed against production database. Rewrite migration into soft-delete or partitioned shadow table.`;
-
-      return { ruleId, nl: text, pythonZ3, smt2, remediationHint, compileLatencyMs, timestamp: now };
-    }
-
-    // 4. Fallback General Deterministic FOL Logic Synthesizer
-    const ruleId = `INV_LIVE_JUDGE_GEN_${randomSuffix}`;
-    const pythonZ3 = `# Microsoft Z3 SMT Formal Invariant [Hot-Loaded Rule: ${ruleId}]
-# Natural Language: "${text}"
-s.set("timeout", 50)
-s.assert_and_track(
-    Implies(action_mutation_active == True, safety_precondition_satisfied == True),
-    "${ruleId}"
-)
-# Soundness: 100% Deterministic Z3 Theorem Prover Verified`;
-
-    const smt2 = `; SMT-LIB2 Benchmark Dump (Compiled via Chronos-Zero Synthesizer)
-(set-logic QF_UF)
-(declare-const action_mutation_active Bool)
-(declare-const safety_precondition_satisfied Bool)
-(assert (! (=> action_mutation_active safety_precondition_satisfied) :named ${ruleId}))
-(check-sat)`;
-
-    const remediationHint = `Violation of ${ruleId}: Action mutation attempted while precondition predicate was false. Provide valid authorization token or abort mutation.`;
-
-    return { ruleId, nl: text, pythonZ3, smt2, remediationHint, compileLatencyMs, timestamp: now };
-  };
-
-  const handleCompile = () => {
-    if (!customRule.trim()) return;
+  /** POST /v1/z3/compile-policy: AST sandbox, SAT/UNSAT synthetic vectors, then hot-load. */
+  const compile = async (text: string, cartridge: CartridgeId) => {
+    const nl = text.trim();
+    if (!nl || isCompiling) return;
+    counterRef.current = (counterRef.current % 99) + 1;
+    // Contract 3 rule_id pattern: ^INV_[A-Z]+_[0-9]{2}_[A-Z0-9_]+$
+    const ruleId = `INV_POL_${String(counterRef.current).padStart(2, "0")}_${CARTRIDGE_TAG[cartridge]}`;
     setIsCompiling(true);
-    setCompileStep("Tokenizing Natural Language Grammar...");
-
-    setTimeout(() => {
-      setCompileStep("Constructing First-Order Logic AST (Z3 Real/Int Types)...");
-    }, 280);
-
-    setTimeout(() => {
-      setCompileStep("Checking Invariant Decidability & Non-Contradiction...");
-    }, 620);
-
-    setTimeout(() => {
-      setCompileStep("Hot-Reloading Rule into RAM Kernel Proxy (/dev/shm)...");
-    }, 950);
-
-    setTimeout(() => {
-      const result = compileNlToZ3(customRule);
-      setCompiledResult(result);
+    setError(null);
+    try {
+      const res = await fetch("/v1/z3/compile-policy", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ cartridge_id: cartridge, rule_id: ruleId, natural_language_rule: nl }),
+        signal: AbortSignal.timeout(5000),
+      });
+      const data = (await res.json().catch(() => null)) as PolicyCompileResponse | null;
+      if (!res.ok || !data) {
+        throw new Error(`Z3 verifier returned HTTP ${res.status}`);
+      }
+      if (data.status !== "COMPILED") {
+        throw new Error(data.message || "Policy could not be compiled");
+      }
+      const formal = data.compiled_code || data.formal_assertion;
+      setCompiledResult({
+        ruleId: data.rule_id,
+        cartridge,
+        nl,
+        pythonZ3: `# ${nl}\n# Hot-loaded into the ${cartridge} prover registry (AST-sandboxed, tested on SAT + UNSAT vectors)\ns.set("timeout", 50)\ns.assert_and_track(\n    ${formal},\n    "${data.rule_id}"\n)`,
+        smt2: data.smt2_dump || "",
+        remediationHint: data.remediation_hint || "",
+        compileLatencyMs: data.compilation_latency_ms ?? null,
+      });
+      onPolicyCompiled({ cartridge, ruleId: data.rule_id, text: nl });
+    } catch (e) {
+      const message = (e as Error).message;
+      setError(
+        message.includes("fetch") || message.includes("timed out") || message.includes("aborted")
+          ? `Z3 verifier unreachable on :8001 (${message})`
+          : message
+      );
+    } finally {
       setIsCompiling(false);
-      setCompileStep("");
-    }, 1250); // Under 2 seconds total!
-  };
-
-  const handleSelectPreset = (preset: { nl: string }) => {
-    setCustomRule(preset.nl);
-    const result = compileNlToZ3(preset.nl);
-    setCompiledResult(result);
+    }
   };
 
   const handleCopyCode = () => {
@@ -289,6 +121,11 @@ s.assert_and_track(
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
+
+  const presets = [
+    ...JUDGE_PRESETS.filter((p) => p.cartridge === activeCartridge),
+    ...JUDGE_PRESETS.filter((p) => p.cartridge !== activeCartridge),
+  ];
 
   return (
     <footer className="w-full bg-[#090D16] border-t border-[#1E293B] select-none text-slate-300 font-mono shrink-0">
@@ -306,13 +143,13 @@ s.assert_and_track(
           </span>
           <span className="hidden sm:inline-flex items-center gap-1 text-[10px] text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-700/50">
             <CheckCircle2 className="w-3 h-3 text-[#10B981]" />
-            Deterministic Z3 Compiler &lt; 2s
+            POST /v1/z3/compile-policy
           </span>
 
-          {compiledResult && (
-            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-950 border border-emerald-500 text-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.35)] animate-pulse">
+          {activePolicy && (
+            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-950 border border-emerald-500 text-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.35)]">
               <ShieldCheck className="w-3.5 h-3.5 text-[#10B981]" />
-              VERIFIED &amp; HOT-LOADED
+              ENFORCED ON NEXT {activePolicy.cartridge} RUN: {activePolicy.ruleId}
             </span>
           )}
         </div>
@@ -324,11 +161,7 @@ s.assert_and_track(
           >
             <Sliders className="w-3.5 h-3.5 text-cyan-400" />
             <span className="text-[11px]">{isExpanded ? "Collapse" : "Expand"}</span>
-            {isExpanded ? (
-              <ChevronDown className="w-3.5 h-3.5" />
-            ) : (
-              <ChevronUp className="w-3.5 h-3.5" />
-            )}
+            {isExpanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronUp className="w-3.5 h-3.5" />}
           </button>
         </div>
       </div>
@@ -336,33 +169,39 @@ s.assert_and_track(
       {/* Expandable Studio Body */}
       {isExpanded && (
         <div className="p-3 bg-[#090D16]/95 grid grid-cols-1 lg:grid-cols-12 gap-3 text-xs">
-          {/* Left Column: Natural Language Input & Judge Q&A Quick Chips (Col 1-7) */}
+          {/* Left Column: Natural Language Input & Judge Q&A Quick Chips */}
           <div className="lg:col-span-7 space-y-2.5">
-            {/* Quick Chips Header */}
             <div className="flex items-center justify-between">
               <span className="text-[10px] uppercase text-slate-400 font-semibold flex items-center gap-1.5">
                 <Sparkles className="w-3 h-3 text-cyan-400" />
                 Judge Q&amp;A Plain-English Presets:
               </span>
               <span className="text-[9px] text-slate-500">
-                Click any prompt or type arbitrary rule below
+                Click a preset (compiles for its cartridge) or type a rule for {activeCartridge}
               </span>
             </div>
 
-            {/* Quick Chips Carousel */}
             <div className="flex flex-wrap gap-1.5">
-              {judgePresets.map((preset, idx) => (
+              {presets.map((preset) => (
                 <button
-                  key={idx}
-                  onClick={() => handleSelectPreset(preset)}
-                  className="px-2.5 py-1 rounded bg-[#0F172A] hover:bg-[#1E293B] border border-[#1E293B] hover:border-cyan-500/50 text-[10px] text-slate-300 transition-all shadow-sm"
+                  key={preset.nl}
+                  onClick={() => {
+                    setCustomRule(preset.nl);
+                    compile(preset.nl, preset.cartridge);
+                  }}
+                  disabled={isCompiling}
+                  title={`${preset.cartridge}: ${preset.nl}`}
+                  className={`px-2.5 py-1 rounded border text-[10px] transition-all shadow-sm disabled:opacity-50 ${
+                    preset.cartridge === activeCartridge
+                      ? "bg-[#0F172A] hover:bg-[#1E293B] border-cyan-800/70 text-slate-200"
+                      : "bg-[#0B1120] hover:bg-[#1E293B] border-[#1E293B] text-slate-500"
+                  }`}
                 >
                   {preset.label}
                 </button>
               ))}
             </div>
 
-            {/* Input Box & Compile Button */}
             <div className="flex gap-2">
               <div className="relative flex-1">
                 <input
@@ -370,9 +209,9 @@ s.assert_and_track(
                   value={customRule}
                   onChange={(e) => setCustomRule(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter") handleCompile();
+                    if (e.key === "Enter") compile(customRule, activeCartridge);
                   }}
-                  placeholder="Type any plain-English rule (e.g. Prevent transfer > $50k without 2FA, or Block NSAID if eGFR < 30)..."
+                  placeholder="Type a plain-English rule, e.g. Block any wire transfer exceeding $5,000 unless the IBAN is allowlisted"
                   className="w-full bg-slate-950 px-3 py-2 rounded-md border border-[#1E293B] text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-cyan-500 text-xs font-mono pr-8"
                 />
                 {customRule && (
@@ -386,7 +225,7 @@ s.assert_and_track(
               </div>
 
               <button
-                onClick={handleCompile}
+                onClick={() => compile(customRule, activeCartridge)}
                 disabled={isCompiling || !customRule.trim()}
                 className="flex items-center gap-1.5 px-4 py-2 rounded-md bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-slate-950 font-bold text-xs transition-colors shrink-0 shadow-sm"
               >
@@ -395,54 +234,49 @@ s.assert_and_track(
               </button>
             </div>
 
-            {/* Live Compiler Pipeline Stage Indicator */}
             {isCompiling && (
               <div className="flex items-center gap-2 p-2 rounded bg-cyan-950/40 border border-cyan-800/60 text-cyan-300 text-[11px] animate-pulse">
                 <Cpu className="w-3.5 h-3.5 text-cyan-400 animate-spin" />
-                <span className="font-semibold">{compileStep}</span>
+                <span className="font-semibold">
+                  Compiling on the Z3 verifier: AST sandbox, contradiction/tautology check, SAT + UNSAT test vectors...
+                </span>
+              </div>
+            )}
+            {error && !isCompiling && (
+              <div className="flex items-start gap-2 p-2 rounded bg-red-950/50 border border-red-800/70 text-red-300 text-[11px]">
+                <AlertTriangle className="w-3.5 h-3.5 text-red-400 shrink-0 mt-0.5" />
+                <span className="font-semibold break-all">Not loaded: {error}</span>
               </div>
             )}
           </div>
 
-          {/* Right Column: Code Output, Tabs, and Verified Badge (Col 8-12) */}
+          {/* Right Column: Code Output, Tabs, and Status */}
           <div className="lg:col-span-5 bg-slate-950 p-2.5 rounded-lg border border-[#1E293B] space-y-2 flex flex-col justify-between">
-            {/* Header with Tabs and Copy Button */}
             <div className="flex items-center justify-between pb-1.5 border-b border-slate-900 text-[10px]">
               <div className="flex items-center gap-1">
-                <button
-                  onClick={() => setActiveTab("PYTHON_Z3")}
-                  className={`px-2 py-0.5 rounded transition-colors font-semibold ${
-                    activeTab === "PYTHON_Z3"
-                      ? "bg-cyan-950 text-cyan-300 border border-cyan-700/60"
-                      : "text-slate-400 hover:text-slate-200"
-                  }`}
-                >
-                  Python Z3
-                </button>
-                <button
-                  onClick={() => setActiveTab("SMT2")}
-                  className={`px-2 py-0.5 rounded transition-colors font-semibold ${
-                    activeTab === "SMT2"
-                      ? "bg-cyan-950 text-cyan-300 border border-cyan-700/60"
-                      : "text-slate-400 hover:text-slate-200"
-                  }`}
-                >
-                  SMT-LIB2
-                </button>
-                <button
-                  onClick={() => setActiveTab("HINT")}
-                  className={`px-2 py-0.5 rounded transition-colors font-semibold ${
-                    activeTab === "HINT"
-                      ? "bg-cyan-950 text-cyan-300 border border-cyan-700/60"
-                      : "text-slate-400 hover:text-slate-200"
-                  }`}
-                >
-                  Agent Hint
-                </button>
+                {(
+                  [
+                    ["PYTHON_Z3", "Python Z3"],
+                    ["SMT2", "SMT-LIB2"],
+                    ["HINT", "Agent Hint"],
+                  ] as const
+                ).map(([tab, label]) => (
+                  <button
+                    key={tab}
+                    onClick={() => setActiveTab(tab)}
+                    className={`px-2 py-0.5 rounded transition-colors font-semibold ${
+                      activeTab === tab
+                        ? "bg-cyan-950 text-cyan-300 border border-cyan-700/60"
+                        : "text-slate-400 hover:text-slate-200"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
               </div>
 
               <div className="flex items-center gap-2">
-                {compiledResult && (
+                {compiledResult?.compileLatencyMs != null && (
                   <span className="text-[9px] text-emerald-400 font-mono">
                     {compiledResult.compileLatencyMs}ms
                   </span>
@@ -466,7 +300,6 @@ s.assert_and_track(
               </div>
             </div>
 
-            {/* Code Output Viewer */}
             <pre className="text-[10px] text-slate-300 overflow-x-auto max-h-24 leading-relaxed font-mono select-all bg-slate-900/60 p-2 rounded border border-slate-900">
               <code>
                 {compiledResult
@@ -475,25 +308,26 @@ s.assert_and_track(
                     : activeTab === "SMT2"
                     ? compiledResult.smt2
                     : compiledResult.remediationHint
-                  : `# Select a preset above or type any natural language rule to compile into formal Z3 SMT assertions.\ns.assert_and_track(condition, "INV_RULE_ID")`}
+                  : `# Pick a preset or type a rule. The Z3 verifier compiles it into\n# s.assert_and_track(<expr>, "INV_POL_NN_...") and enforces it on the next run.`}
               </code>
             </pre>
 
-            {/* Live Hot-Loaded Footer */}
             {compiledResult ? (
               <div className="flex items-center justify-between pt-1 border-t border-slate-900 text-[10px]">
                 <span className="text-emerald-400 flex items-center gap-1 font-semibold">
                   <CheckCircle2 className="w-3 h-3 text-[#10B981]" />
-                  HOT-LOADED: {compiledResult.ruleId}
+                  LOADED: {compiledResult.ruleId} ({compiledResult.cartridge})
                 </span>
                 <span className="text-slate-500 font-mono">
-                  Compiled in {compiledResult.compileLatencyMs}ms (&lt; 2.0s SLA)
+                  {compiledResult.compileLatencyMs != null
+                    ? `Compiled in ${compiledResult.compileLatencyMs}ms on the verifier`
+                    : "Compiled on the verifier"}
                 </span>
               </div>
             ) : (
               <div className="text-[9px] text-slate-600 flex items-center justify-between">
-                <span>Compiler Status: Ready</span>
-                <span>Z3 SMT-LIB2 Engine: Active</span>
+                <span>Compiler: Z3 verifier :8001</span>
+                <span>Run the cartridge after compiling to see it enforced</span>
               </div>
             )}
           </div>

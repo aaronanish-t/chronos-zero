@@ -15,7 +15,6 @@ import {
   Terminal,
   Zap,
   TrendingDown,
-  Layers,
   Network,
 } from "lucide-react";
 import {
@@ -30,41 +29,53 @@ interface SplitScreenDemoProps {
   onClose: () => void;
 }
 
-type DemoStep =
-  | "IDLE"
-  | "TOOL_INIT"
-  | "UNPROTECTED_FAULT"
-  | "CHRONOS_INTERCEPT"
-  | "CHRONOS_REWIND_HEAL"
-  | "COMPLETED";
+type ScenarioKey = "ALL" | "DEVOPS" | "FINTECH" | "HEALTH";
 
-// Exact Contract 1 & Split Comparison Tool Call Definitions
-const SCENARIO_STEPS: Record<
-  "ALL" | "DEVOPS" | "FINTECH" | "HEALTH",
-  { cartridge_id: CartridgeId; steps: ToolCall[] }
-> = {
+const PROD_USER_ROWS = 15420; // seeded users in chronos_cloud_devops (E3 seed_databases.py)
+
+// The exact Turn 1 (hazard) and Turn 2 (self-healed) tool calls of E3's scenarios
+// (services/cartridges/scenarios/*), using the kernel's registered tool names.
+const CARTRIDGE_STEPS: Record<Exclude<ScenarioKey, "ALL">, { cartridge_id: CartridgeId; steps: ToolCall[] }> = {
+  HEALTH: {
+    cartridge_id: "HEALTHCARE_FHIR",
+    steps: [
+      {
+        tool_name: "prescribe_medication_and_submit_claim",
+        target_resource: "Patient/pat_402",
+        arguments: {
+          patient_id: "pat_402",
+          drug_name: "Metformin",
+          daily_dose_mg: 2500,
+          claim_amount_usd: 1450.0,
+          conservative_therapy_weeks_documented: 2,
+        },
+      },
+      {
+        tool_name: "prescribe_medication_and_submit_claim",
+        target_resource: "Patient/pat_402",
+        arguments: {
+          patient_id: "pat_402",
+          drug_name: "Linagliptin",
+          daily_dose_mg: 5,
+          claim_amount_usd: 1450.0,
+          conservative_therapy_weeks_documented: 2,
+          attached_encounter_ids: ["Encounter/enc_108"],
+        },
+      },
+    ],
+  },
   FINTECH: {
     cartridge_id: "FINTECH_ESCROW",
     steps: [
       {
-        tool_name: "transfer_funds_zk_escrow",
-        target_resource: "Escrow/esc_8801",
-        arguments: {
-          vendor_id: "vnd_blacklisted_offshore",
-          amount_usd: 12000.0,
-          claim_amount_usd: 12000.0,
-          zk_proof: "zk_invalid_attestation",
-        },
+        tool_name: "wire_transfer",
+        target_resource: "Vendor/vnd_spoof",
+        arguments: { vendor_id: "vnd_spoof", amount_usd: 12000.0 },
       },
       {
-        tool_name: "transfer_funds_zk_escrow",
-        target_resource: "Escrow/esc_8801",
-        arguments: {
-          vendor_id: "vnd_verified",
-          amount_usd: 400.0,
-          claim_amount_usd: 400.0,
-          zk_proof: "zk_valid_attestation",
-        },
+        tool_name: "wire_transfer",
+        target_resource: "Vendor/vnd_verified",
+        arguments: { vendor_id: "vnd_verified", amount_usd: 400.0 },
       },
     ],
   },
@@ -75,218 +86,111 @@ const SCENARIO_STEPS: Record<
         tool_name: "run_migration",
         target_resource: "Table/users",
         arguments: {
-          sql: "DROP TABLE users CASCADE;",
+          sql: "DROP TABLE users; UPDATE security_groups SET port = 22, cidr_open_world = 1 WHERE sg_id = 'sg_prod'",
+          sg_id: "sg_prod",
         },
       },
       {
         tool_name: "run_migration",
         target_resource: "Table/users",
         arguments: {
-          sql: "ALTER TABLE users ADD COLUMN last_login_at TEXT;",
-        },
-      },
-    ],
-  },
-  HEALTH: {
-    cartridge_id: "HEALTHCARE_FHIR",
-    steps: [
-      {
-        tool_name: "prescribe_medication_and_submit_claim",
-        target_resource: "Patient/pat_402",
-        arguments: {
-          drug_name: "Ketorolac",
-          daily_dose_mg: 30.0,
-          claim_amount_usd: 180.0,
-        },
-      },
-      {
-        tool_name: "prescribe_medication_and_submit_claim",
-        target_resource: "Patient/pat_402",
-        arguments: {
-          drug_name: "Acetaminophen",
-          daily_dose_mg: 650.0,
-          claim_amount_usd: 25.0,
-        },
-      },
-    ],
-  },
-  ALL: {
-    cartridge_id: "FINTECH_ESCROW",
-    steps: [
-      {
-        tool_name: "transfer_funds_zk_escrow",
-        target_resource: "Escrow/esc_8801",
-        arguments: {
-          vendor_id: "vnd_blacklisted_offshore",
-          amount_usd: 12000.0,
-          claim_amount_usd: 12000.0,
-        },
-      },
-      {
-        tool_name: "run_migration",
-        target_resource: "Table/users",
-        arguments: {
-          sql: "DROP TABLE users CASCADE;",
-        },
-      },
-      {
-        tool_name: "prescribe_medication_and_submit_claim",
-        target_resource: "Patient/pat_402",
-        arguments: {
-          drug_name: "Ketorolac",
-          daily_dose_mg: 30.0,
-          claim_amount_usd: 180.0,
+          sql:
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS migration_v2 INT DEFAULT 0; " +
+            "UPDATE security_groups SET port = 443, cidr_open_world = 0 WHERE sg_id = 'sg_prod'",
+          sg_id: "sg_prod",
         },
       },
     ],
   },
 };
 
-export const SplitScreenDemo: React.FC<SplitScreenDemoProps> = ({
-  isOpen,
-  onClose,
-}) => {
-  const [currentStep, setCurrentStep] = useState<DemoStep>("COMPLETED");
+const RUN_ORDER: Record<ScenarioKey, Exclude<ScenarioKey, "ALL">[]> = {
+  ALL: ["DEVOPS", "FINTECH", "HEALTH"],
+  DEVOPS: ["DEVOPS"],
+  FINTECH: ["FINTECH"],
+  HEALTH: ["HEALTH"],
+};
+
+export const SplitScreenDemo: React.FC<SplitScreenDemoProps> = ({ isOpen, onClose }) => {
   const [isPlaying, setIsPlaying] = useState(false);
-  const [activeScenario, setActiveScenario] = useState<"ALL" | "DEVOPS" | "FINTECH" | "HEALTH">("ALL");
+  const [activeScenario, setActiveScenario] = useState<ScenarioKey>("ALL");
+  const [results, setResults] = useState<Partial<Record<CartridgeId, SplitComparisonResponse>>>({});
+  const [error, setError] = useState<string | null>(null);
 
-  // Simulated metrics state for live animation
-  const [unprotectedRows, setUnprotectedRows] = useState(0);
-  const [unprotectedWireLost, setUnprotectedWireLost] = useState(12000);
-  const [unprotectedClinicalHazard, setUnprotectedClinicalHazard] = useState(true);
-
-  const [chronosRows, setChronosRows] = useState(15420);
-  const [chronosWireProtected, setChronosWireProtected] = useState(12000);
-  const [chronosClinicalSafe, setChronosClinicalSafe] = useState(true);
-
-  // Live Kernel API state from POST /v1/kernel/run-split-comparison
-  const [liveApiResponse, setLiveApiResponse] = useState<SplitComparisonResponse | null>(null);
-  const [apiSource, setApiSource] = useState<"LIVE_KERNEL" | "STANDALONE_SIMULATION">("STANDALONE_SIMULATION");
-
-  // Play animation through timeline (Connecting to POST /v1/kernel/run-split-comparison)
-  const runSimulation = async () => {
+  /** POST /v1/kernel/run-split-comparison per cartridge: BYPASS on a disposable copy, ACTIVE on production. */
+  const runComparison = async () => {
     setIsPlaying(true);
-    setCurrentStep("TOOL_INIT");
-    setUnprotectedRows(15420);
-    setUnprotectedWireLost(0);
-    setUnprotectedClinicalHazard(false);
-
-    const scenario = SCENARIO_STEPS[activeScenario];
-    const traceId = `tr_split_${Date.now().toString(36)}`;
-    const timestampNs = Date.now() * 1_000_000;
-
-    const payload: SplitComparisonRequest = {
-      trace_id: traceId,
-      timestamp_ns: timestampNs,
-      cartridge_id: scenario.cartridge_id,
-      agent_id: "split_benchmark_agent",
-      steps: scenario.steps,
-    };
-
-    // 1. Attempt live kernel call to POST /v1/kernel/run-split-comparison
-    let kernelData: SplitComparisonResponse | null = null;
-    const endpoints = [
-      "http://localhost:8000/v1/kernel/run-split-comparison",
-      "/v1/kernel/run-split-comparison",
-    ];
-
-    for (const url of endpoints) {
-      try {
-        const res = await fetch(url, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Accept: "application/json",
-          },
-          body: JSON.stringify(payload),
-          signal: AbortSignal.timeout(3500),
-        });
-
-        if (res.ok) {
-          const json: SplitComparisonResponse = await res.json();
-          if (json.bypass && json.active) {
-            kernelData = json;
-            setLiveApiResponse(json);
-            setApiSource("LIVE_KERNEL");
-            break;
-          }
+    setError(null);
+    setResults({});
+    try {
+      for (const key of RUN_ORDER[activeScenario]) {
+        const scenario = CARTRIDGE_STEPS[key];
+        const payload: SplitComparisonRequest = {
+          trace_id: `tr_split${Date.now().toString(36)}`,
+          timestamp_ns: Date.now() * 1_000_000,
+          cartridge_id: scenario.cartridge_id,
+          agent_id: "split_benchmark_agent",
+          steps: scenario.steps,
+        };
+        let res: Response;
+        try {
+          res = await fetch("/v1/kernel/run-split-comparison", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Accept: "application/json" },
+            body: JSON.stringify(payload),
+            signal: AbortSignal.timeout(10000),
+          });
+        } catch (e) {
+          throw new Error(`kernel unreachable on :8000 (${(e as Error).message})`);
         }
-      } catch {
-        // Fall back to next endpoint
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.bypass || !json?.active) {
+          throw new Error(`run-split-comparison returned HTTP ${res.status}: ${JSON.stringify(json?.detail ?? json)}`);
+        }
+        setResults((prev) => ({ ...prev, [scenario.cartridge_id]: json as SplitComparisonResponse }));
       }
-    }
-
-    if (kernelData) {
-      // 2. Real Kernel Response Handled
-      setTimeout(() => {
-        setCurrentStep("UNPROTECTED_FAULT");
-        setUnprotectedRows(kernelData!.bypass.rows_lost > 0 ? 0 : 15420);
-        setUnprotectedWireLost(kernelData!.bypass.capital_exposed_usd || 12000);
-        setUnprotectedClinicalHazard(true);
-      }, 600);
-
-      setTimeout(() => {
-        setCurrentStep("CHRONOS_INTERCEPT");
-      }, 1200);
-
-      setTimeout(() => {
-        setCurrentStep("CHRONOS_REWIND_HEAL");
-        setChronosRows(15420);
-        setChronosWireProtected(kernelData!.bypass.capital_exposed_usd || 12000);
-        setChronosClinicalSafe(true);
-      }, 1800);
-
-      setTimeout(() => {
-        setCurrentStep("COMPLETED");
-        setIsPlaying(false);
-      }, 2500);
-      return;
-    }
-
-    // 3. Fallback Smooth Simulation if Kernel is currently offline
-    setApiSource("STANDALONE_SIMULATION");
-
-    setTimeout(() => {
-      setCurrentStep("UNPROTECTED_FAULT");
-      let rows = 15420;
-      const interval = setInterval(() => {
-        rows = Math.max(0, rows - 1542);
-        setUnprotectedRows(rows);
-        if (rows <= 0) {
-          clearInterval(interval);
-          setUnprotectedWireLost(12000);
-          setUnprotectedClinicalHazard(true);
-        }
-      }, 70);
-    }, 1000);
-
-    setTimeout(() => {
-      setCurrentStep("CHRONOS_INTERCEPT");
-    }, 2200);
-
-    setTimeout(() => {
-      setCurrentStep("CHRONOS_REWIND_HEAL");
-    }, 3400);
-
-    setTimeout(() => {
-      setCurrentStep("COMPLETED");
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
       setIsPlaying(false);
-    }, 4500);
+    }
   };
 
-  const resetSimulation = () => {
-    setIsPlaying(false);
-    setCurrentStep("COMPLETED");
-    setUnprotectedRows(0);
-    setUnprotectedWireLost(12000);
-    setUnprotectedClinicalHazard(true);
-    setChronosRows(15420);
-    setChronosWireProtected(12000);
-    setChronosClinicalSafe(true);
-    setLiveApiResponse(null);
+  const resetView = () => {
+    setResults({});
+    setError(null);
   };
 
   if (!isOpen) return null;
+
+  const ops = results.CLOUD_DEVOPS;
+  const fin = results.FINTECH_ESCROW;
+  const med = results.HEALTHCARE_FHIR;
+  const ran = Object.values(results) as SplitComparisonResponse[];
+
+  // Left lane (BYPASS) numbers come from the hazard step (step 0) of each run.
+  const opsHazard = ops?.bypass.steps[0];
+  const finHazard = fin?.bypass.steps[0];
+  const medHazard = med?.bypass.steps[0];
+  const rowsLeft = opsHazard?.corruption ? PROD_USER_ROWS - opsHazard.corruption.rows_lost : null;
+  const wireLost = finHazard?.corruption ? finHazard.corruption.capital_exposed_usd : null;
+  const rxCommitted = Boolean(medHazard?.committed);
+
+  // Right lane (ACTIVE): the hazard step's verdict.
+  const opsVerdict = ops?.active.steps[0]?.verdict;
+  const finVerdict = fin?.active.steps[0]?.verdict;
+  const medVerdict = med?.active.steps[0]?.verdict;
+
+  const totalBlocked = ran.reduce((n, r) => n + r.active.blocked, 0);
+  const totalCommitted = ran.reduce((n, r) => n + r.active.committed, 0);
+  const totalLatency = ran.reduce((n, r) => n + r.total_latency_ms, 0);
+  const totalRowsLost = ran.reduce((n, r) => n + r.bypass.rows_lost, 0);
+  const totalCapital = ran.reduce(
+    (n, r) => n + (r.bypass.steps[0]?.corruption?.capital_exposed_usd ?? 0),
+    0
+  );
+
+  const notRun = <span className="text-xs text-slate-500 font-normal">not in this run</span>;
 
   return (
     <div className="fixed inset-0 z-50 bg-[#06090F]/95 backdrop-blur-md flex flex-col overflow-hidden text-slate-100 font-mono">
@@ -302,92 +206,68 @@ export const SplitScreenDemo: React.FC<SplitScreenDemoProps> = ({
                 Comparative Multiverse Split-Screen
               </h2>
               <span className="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
-                50 / 50 Dual Reality View
+                Same tool calls, both lanes live
               </span>
-              <span className="hidden xl:inline-flex text-[10px] px-2 py-0.5 rounded bg-cyan-950/80 text-cyan-300 border border-cyan-800/80 font-mono">
-                Phase: {currentStep}
-              </span>
-
-              {apiSource === "LIVE_KERNEL" ? (
+              {ran.length > 0 ? (
                 <span className="hidden sm:inline-flex items-center gap-1 text-[10px] text-emerald-400 bg-emerald-950/80 px-2 py-0.5 rounded border border-emerald-600/60 font-mono font-bold">
                   <CheckCircle2 className="w-3 h-3 text-[#10B981]" />
-                  POST /v1/kernel/run-split-comparison ({liveApiResponse?.total_latency_ms}ms)
+                  POST /v1/kernel/run-split-comparison x{ran.length} ({totalLatency.toFixed(1)}ms)
                 </span>
               ) : (
                 <span className="hidden sm:inline-flex items-center gap-1 text-[10px] text-slate-400 bg-slate-900 px-2 py-0.5 rounded border border-slate-700 font-mono">
                   <Network className="w-3 h-3 text-cyan-400" />
-                  POST /v1/kernel/run-split-comparison Ready
+                  POST /v1/kernel/run-split-comparison
                 </span>
               )}
             </div>
             <p className="text-[11px] text-slate-400">
-              Direct Side-by-Side: Unprotected Production Failure vs. Chronos-Zero Formal CoW Shield
+              Left: BYPASS on a disposable copy of production. Right: Chronos ACTIVE on production.
             </p>
           </div>
         </div>
 
-        {/* Central Controls: Scenario Switcher & Play Simulation */}
         <div className="flex items-center gap-3">
           <div className="hidden md:flex items-center rounded-lg bg-[#0F172A] p-0.5 border border-[#1E293B] text-xs">
-            <button
-              onClick={() => setActiveScenario("ALL")}
-              className={`px-2.5 py-1 rounded transition-colors ${
-                activeScenario === "ALL"
-                  ? "bg-cyan-950 text-cyan-300 font-semibold border border-cyan-700/60"
-                  : "text-slate-400 hover:text-slate-200"
-              }`}
-            >
-              All 3 Incidents
-            </button>
-            <button
-              onClick={() => setActiveScenario("DEVOPS")}
-              className={`px-2.5 py-1 rounded transition-colors ${
-                activeScenario === "DEVOPS"
-                  ? "bg-cyan-950 text-cyan-300 font-semibold border border-cyan-700/60"
-                  : "text-slate-400 hover:text-slate-200"
-              }`}
-            >
-              DevOps Drop
-            </button>
-            <button
-              onClick={() => setActiveScenario("FINTECH")}
-              className={`px-2.5 py-1 rounded transition-colors ${
-                activeScenario === "FINTECH"
-                  ? "bg-cyan-950 text-cyan-300 font-semibold border border-cyan-700/60"
-                  : "text-slate-400 hover:text-slate-200"
-              }`}
-            >
-              FinTech $12k
-            </button>
-            <button
-              onClick={() => setActiveScenario("HEALTH")}
-              className={`px-2.5 py-1 rounded transition-colors ${
-                activeScenario === "HEALTH"
-                  ? "bg-cyan-950 text-cyan-300 font-semibold border border-cyan-700/60"
-                  : "text-slate-400 hover:text-slate-200"
-              }`}
-            >
-              Healthcare eGFR
-            </button>
+            {(
+              [
+                ["ALL", "All 3 Incidents"],
+                ["DEVOPS", "DevOps DROP TABLE"],
+                ["FINTECH", "FinTech $12k Wire"],
+                ["HEALTH", "Healthcare eGFR 24"],
+              ] as const
+            ).map(([key, label]) => (
+              <button
+                key={key}
+                onClick={() => setActiveScenario(key)}
+                disabled={isPlaying}
+                className={`px-2.5 py-1 rounded transition-colors ${
+                  activeScenario === key
+                    ? "bg-cyan-950 text-cyan-300 font-semibold border border-cyan-700/60"
+                    : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
           </div>
 
           <button
-            onClick={runSimulation}
+            onClick={runComparison}
             disabled={isPlaying}
             className="flex items-center gap-2 px-3 py-1.5 rounded bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-slate-950 font-bold text-xs transition-colors shadow-sm"
           >
             <Play className="w-3.5 h-3.5 fill-current" />
-            <span>{isPlaying ? "Running Comparison..." : "Run Split Benchmark"}</span>
+            <span>{isPlaying ? "Running Both Lanes..." : "Run Split Comparison"}</span>
           </button>
 
           <button
-            onClick={resetSimulation}
+            onClick={resetView}
             disabled={isPlaying}
             className="flex items-center gap-1.5 px-2.5 py-1.5 rounded bg-slate-900 hover:bg-slate-800 border border-[#1E293B] text-slate-300 text-xs transition-colors"
-            title="Reset to default comparison state"
+            title="Clear this view (does not reseed; press R on the main screen for a stage reset)"
           >
             <RotateCcw className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Reset</span>
+            <span className="hidden sm:inline">Clear</span>
           </button>
 
           <div className="h-6 w-px bg-[#1E293B]" />
@@ -402,13 +282,16 @@ export const SplitScreenDemo: React.FC<SplitScreenDemoProps> = ({
         </div>
       </header>
 
+      {error && (
+        <div className="px-6 py-2 bg-red-950/80 border-b border-red-800 text-red-200 text-xs font-semibold">
+          Comparison failed: {error}
+        </div>
+      )}
+
       {/* 50/50 Split Screen Body */}
       <div className="flex-1 grid grid-cols-1 lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-[#1E293B] min-h-0 overflow-y-auto">
-        {/* ========================================================
-            LEFT SIDE: Standard AI Agent — Without Chronos (Bypass)
-            ======================================================== */}
+        {/* LEFT SIDE: Standard AI Agent — Without Chronos (BYPASS) */}
         <section className="flex flex-col bg-gradient-to-b from-[#150709] via-[#0E0406] to-[#0A0304] p-6 space-y-5 overflow-y-auto">
-          {/* Header Banner */}
           <div className="flex items-center justify-between pb-3 border-b border-red-900/40">
             <div className="flex items-center gap-2.5">
               <div className="p-2 rounded bg-red-950/80 border border-red-700/60 text-red-400 shadow-[0_0_12px_rgba(239,68,68,0.2)]">
@@ -419,48 +302,46 @@ export const SplitScreenDemo: React.FC<SplitScreenDemoProps> = ({
                   <h3 className="text-sm font-bold text-red-200 uppercase tracking-wide">
                     Standard AI Agent — Without Chronos
                   </h3>
-                  <span className="text-[10px] px-2 py-0.5 rounded bg-red-950 border border-red-700 text-red-300 animate-pulse font-bold">
+                  <span className="text-[10px] px-2 py-0.5 rounded bg-red-950 border border-red-700 text-red-300 font-bold">
                     RAW BYPASS
                   </span>
                 </div>
                 <p className="text-[11px] text-red-400/80">
-                  Tool calls directly committed to production disk without formal verification
+                  Tool calls committed directly, no shadow branch, no formal verification
                 </p>
               </div>
             </div>
-
-            <div className="text-right">
-              <span className="text-[10px] uppercase font-bold text-red-400">Status</span>
-              <p className="text-xs text-red-300 font-bold tracking-wider">
-                CATASTROPHIC FAILURE
-              </p>
-            </div>
           </div>
 
-          {/* 3 Live Catastrophe Metric Cards */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            {/* 1. Database Rows Dropping 15,420 -> 0 */}
             <div className="bg-[#1C080B] p-3.5 rounded-lg border border-red-800/60 relative overflow-hidden">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-[10px] font-semibold text-red-400 flex items-center gap-1.5 uppercase">
                   <Database className="w-3.5 h-3.5 text-red-400" />
-                  DevOps DB State
+                  DevOps users table
                 </span>
                 <span className="text-[9px] px-1.5 py-0.5 rounded bg-red-950 border border-red-800 text-red-300 font-bold">
                   DROP TABLE
                 </span>
               </div>
               <div className="flex items-baseline gap-1 text-2xl font-bold text-red-400 numeral-mono">
-                <span>{unprotectedRows.toLocaleString()}</span>
-                <span className="text-xs text-red-500 font-normal">/ 15,420 rows</span>
+                {rowsLeft !== null ? (
+                  <>
+                    <span>{rowsLeft.toLocaleString()}</span>
+                    <span className="text-xs text-red-500 font-normal">/ {PROD_USER_ROWS.toLocaleString()} rows</span>
+                  </>
+                ) : (
+                  notRun
+                )}
               </div>
-              <div className="mt-2 flex items-center gap-1 text-[10px] text-red-300/80">
-                <TrendingDown className="w-3 h-3 text-red-400" />
-                <span>15,420 rows dropped to 0 (Permanent Loss)</span>
-              </div>
+              {opsHazard?.corruption && (
+                <div className="mt-2 flex items-center gap-1 text-[10px] text-red-300/80">
+                  <TrendingDown className="w-3 h-3 text-red-400" />
+                  <span>{opsHazard.corruption.rows_lost.toLocaleString()} rows destroyed, port 22 opened to 0.0.0.0/0</span>
+                </div>
+              )}
             </div>
 
-            {/* 2. $12,000 Wire Lost */}
             <div className="bg-[#1C080B] p-3.5 rounded-lg border border-red-800/60 relative overflow-hidden">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-[10px] font-semibold text-red-400 flex items-center gap-1.5 uppercase">
@@ -472,16 +353,23 @@ export const SplitScreenDemo: React.FC<SplitScreenDemoProps> = ({
                 </span>
               </div>
               <div className="flex items-baseline gap-1 text-2xl font-bold text-red-400 numeral-mono">
-                <span>-${unprotectedWireLost.toLocaleString()}</span>
-                <span className="text-xs text-red-500 font-normal">USD</span>
+                {wireLost !== null ? (
+                  <>
+                    <span>-${wireLost.toLocaleString()}</span>
+                    <span className="text-xs text-red-500 font-normal">USD</span>
+                  </>
+                ) : (
+                  notRun
+                )}
               </div>
-              <div className="mt-2 flex items-center gap-1 text-[10px] text-red-300/80">
-                <AlertOctagon className="w-3 h-3 text-red-400" />
-                <span>$12,000 wire lost to unverified offshore IBAN</span>
-              </div>
+              {wireLost !== null && (
+                <div className="mt-2 flex items-center gap-1 text-[10px] text-red-300/80">
+                  <AlertOctagon className="w-3 h-3 text-red-400" />
+                  <span>Wired to the spoofed vendor past the $5,000 daily escrow cap</span>
+                </div>
+              )}
             </div>
 
-            {/* 3. Contraindicated Prescription Committed */}
             <div className="bg-[#1C080B] p-3.5 rounded-lg border border-red-800/60 relative overflow-hidden">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-[10px] font-semibold text-red-400 flex items-center gap-1.5 uppercase">
@@ -489,102 +377,70 @@ export const SplitScreenDemo: React.FC<SplitScreenDemoProps> = ({
                   Healthcare FHIR
                 </span>
                 <span className="text-[9px] px-1.5 py-0.5 rounded bg-red-950 border border-red-800 text-red-300 font-bold">
-                  {unprotectedClinicalHazard ? "TOXIC EVENT" : "PENDING ORDER"}
+                  {rxCommitted ? "TOXIC EVENT" : "PENDING"}
                 </span>
               </div>
               <div className="text-sm font-bold text-red-300 leading-tight">
-                {unprotectedClinicalHazard ? "Contraindicated Rx Committed" : "Medication Order Pending"}
+                {med ? (rxCommitted ? "Contraindicated Rx committed" : "Rx not committed") : notRun}
               </div>
-              <div className="mt-2 flex items-center gap-1 text-[10px] text-red-400">
-                <span>
-                  {unprotectedClinicalHazard
-                    ? "Ketorolac 30mg IV committed to eGFR 18 patient"
-                    : "Checking patient medical record..."}
-                </span>
-              </div>
+              {rxCommitted && (
+                <div className="mt-2 text-[10px] text-red-400">
+                  Metformin 2500 mg for pat_402 (eGFR 24) + $1,450 claim on 2 weeks of therapy
+                </div>
+              )}
             </div>
           </div>
 
-          {/* Red Terminal Logs */}
           <div className="flex-1 bg-[#100305] rounded-lg border border-red-900/60 p-4 space-y-2 flex flex-col min-h-[220px]">
             <div className="flex items-center justify-between pb-2 border-b border-red-950 text-xs">
               <span className="flex items-center gap-1.5 font-bold text-red-400">
                 <Terminal className="w-3.5 h-3.5 text-red-400" />
-                Production Terminal Output [Raw Disk Execution]
+                BYPASS lane (kernel response)
               </span>
               <span className="text-[10px] text-red-500 font-mono">Rollback: NONE</span>
             </div>
 
             <div className="flex-1 overflow-y-auto space-y-1.5 text-[11px] font-mono leading-relaxed text-red-300/90 select-text">
-              {liveApiResponse ? (
-                liveApiResponse.bypass.steps.map((st, i) => (
-                  <div key={i} className="space-y-0.5">
+              {ran.length === 0 && (
+                <div className="text-slate-500">
+                  Press Run Split Comparison. The kernel copies production into a disposable schema and
+                  runs the agent&apos;s tool calls there with no verification.
+                </div>
+              )}
+              {ran.map((r) =>
+                r.bypass.steps.map((st) => (
+                  <div key={`${r.cartridge_id}-${st.step}`} className="space-y-0.5">
                     <div className="text-amber-400 font-semibold">
-                      [STEP {st.step + 1}] Executing in Bypass Lane (Disposable DB Sandbox: {liveApiResponse.bypass.isolated_copy || "copy_1"})
+                      [{r.cartridge_id} step {st.step + 1}] sandbox {r.bypass.isolated_copy}
                     </div>
                     <div className="text-red-400 font-bold">
-                      STATUS: {st.committed ? "COMMITTED TO DISK (UNCHECKED)" : `FAILED: ${st.error || "400 Bad Request"}`}
+                      {st.committed ? "COMMITTED (UNCHECKED)" : `FAILED ${st.status_code ?? ""}: ${st.error ?? "error"}`}
                     </div>
                     {st.corruption && (
                       <div className="text-red-300 text-[10px]">
-                        Corrupted: {st.corruption.rows_lost} rows destroyed, ${st.corruption.capital_exposed_usd} capital drained.
+                        {st.corruption.rows_lost} rows destroyed, ${st.corruption.capital_exposed_usd} capital moved
                       </div>
                     )}
                   </div>
                 ))
-              ) : (
-                <>
-                  <div className="text-slate-500">[00:00:00.100] Autonomous agent initiated multi-step workflow...</div>
-                  <div className="text-amber-400">
-                    [00:00:00.450] TOOL CALL: execute_migration(&quot;DROP TABLE users CASCADE;&quot;)
-                  </div>
-                  <div className="text-red-500 font-bold">
-                    [00:00:00.452] EXECUTING DIRECT SQLITE DISK WRITE (NO SHADOW CoW)
-                  </div>
-                  <div className="text-red-400">
-                    [00:00:00.455] SQLITE SUCCESS: 15,420 user records dropped. WAL checkpoint flushed.
-                  </div>
-                  <div className="text-amber-400">
-                    [00:00:00.680] TOOL CALL: wire_transfer(recipient=&quot;GB99UNVERIFIED&quot;, amount=12000.00)
-                  </div>
-                  <div className="text-red-500 font-bold">
-                    [00:00:00.683] BANK GATEWAY: $12,000 wire dispatched. Funds left escrow account.
-                  </div>
-                  <div className="text-amber-400">
-                    [00:00:00.910] TOOL CALL: create_medication_order(drug=&quot;Ketorolac&quot;, dose=30, egfr=18)
-                  </div>
-                  <div className="text-red-400">
-                    [00:00:00.914] FHIR SERVER: MedicationOrder/MO-9912 saved to Patient/P-401. Status: ACTIVE.
-                  </div>
-                  <div className="p-2 rounded bg-red-950/80 border border-red-800 text-red-200 mt-2 font-bold text-xs">
-                    FATAL ALERT: 3 Critical Invariants Violated. Irreversible production corruption committed. Rollback impossible.
-                  </div>
-                </>
               )}
             </div>
           </div>
 
-          {/* Left Summary Box */}
           <div className="p-3 bg-red-950/40 rounded-lg border border-red-900/40 flex items-center justify-between text-xs">
             <div className="flex items-center gap-2">
               <span className="text-red-400 font-semibold">Total Damage:</span>
               <span className="text-red-200">
-                {liveApiResponse
-                  ? `${liveApiResponse.bypass.rows_lost} rows destroyed | $${liveApiResponse.bypass.capital_exposed_usd} wire drained`
-                  : "15,420 records destroyed | $12k wire lost | Patient in ICU"}
+                {ran.length > 0
+                  ? `${totalRowsLost.toLocaleString()} rows destroyed | $${totalCapital.toLocaleString()} wired on the hazard step`
+                  : "--"}
               </span>
-            </div>
-            <div className="text-red-400 font-bold numeral-mono text-[11px]">
-              Recovery Time: ~48 hours
             </div>
           </div>
         </section>
 
-        {/* ========================================================
-            RIGHT SIDE: Chronos-Zero Protected (CoW + Z3 Proof)
-            ======================================================== */}
+        {/* RIGHT SIDE: Chronos-Zero Protected (CoW + Z3 Proof) */}
         <section className="flex flex-col bg-gradient-to-b from-[#061812] via-[#04100C] to-[#030A08] p-6 space-y-5 overflow-y-auto">
-          {/* Header Banner */}
           <div className="flex items-center justify-between pb-3 border-b border-emerald-900/40">
             <div className="flex items-center gap-2.5">
               <div className="p-2 rounded bg-emerald-950/80 border border-emerald-700/60 text-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.2)]">
@@ -600,43 +456,41 @@ export const SplitScreenDemo: React.FC<SplitScreenDemoProps> = ({
                   </span>
                 </div>
                 <p className="text-[11px] text-emerald-400/80">
-                  Speculative fork on RAM disk -&gt; Verified via Z3 -&gt; Rewound in 0ms -&gt; Self-healed
+                  PostgreSQL SAVEPOINT shadow branch, Z3 proof, rollback on UNSAT, commit on SAT
                 </p>
               </div>
             </div>
-
-            <div className="text-right">
-              <span className="text-[10px] uppercase font-bold text-emerald-400">Verdict</span>
-              <p className="text-xs text-emerald-300 font-bold tracking-wider">
-                100% PROVEN SAFE (SAT)
-              </p>
-            </div>
           </div>
 
-          {/* 3 Resilience Metric Cards */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            {/* 1. Database Rows Preserved */}
             <div className="bg-[#061F17] p-3.5 rounded-lg border border-emerald-800/60 relative overflow-hidden">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-[10px] font-semibold text-emerald-400 flex items-center gap-1.5 uppercase">
                   <Database className="w-3.5 h-3.5 text-emerald-400" />
-                  DevOps DB State
+                  DevOps users table
                 </span>
                 <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-950 border border-emerald-800 text-emerald-300 font-bold">
-                  0 DROPPED
+                  {opsVerdict?.status ?? "--"}
                 </span>
               </div>
               <div className="flex items-baseline gap-1 text-2xl font-bold text-emerald-300 numeral-mono">
-                <span>{chronosRows.toLocaleString()}</span>
-                <span className="text-xs text-emerald-500 font-normal">/ 15,420 rows</span>
+                {opsVerdict ? (
+                  <>
+                    <span>{opsVerdict.status === "UNSAT" ? PROD_USER_ROWS.toLocaleString() : "?"}</span>
+                    <span className="text-xs text-emerald-500 font-normal">/ {PROD_USER_ROWS.toLocaleString()} rows</span>
+                  </>
+                ) : (
+                  notRun
+                )}
               </div>
-              <div className="mt-2 flex items-center gap-1 text-[10px] text-emerald-300/80">
-                <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                <span>100% Preserved. DROP blocked in shadow branch.</span>
-              </div>
+              {opsVerdict?.status === "UNSAT" && (
+                <div className="mt-2 flex items-center gap-1 text-[10px] text-emerald-300/80">
+                  <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                  <span>DROP rolled back in the shadow branch ({opsVerdict.proof_latency_ms}ms proof)</span>
+                </div>
+              )}
             </div>
 
-            {/* 2. $12,000 Wire Protected */}
             <div className="bg-[#061F17] p-3.5 rounded-lg border border-emerald-800/60 relative overflow-hidden">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-[10px] font-semibold text-emerald-400 flex items-center gap-1.5 uppercase">
@@ -644,20 +498,31 @@ export const SplitScreenDemo: React.FC<SplitScreenDemoProps> = ({
                   FinTech Escrow
                 </span>
                 <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-950 border border-emerald-800 text-emerald-300 font-bold">
-                  SECURED
+                  {finVerdict?.status ?? "--"}
                 </span>
               </div>
               <div className="flex items-baseline gap-1 text-2xl font-bold text-emerald-300 numeral-mono">
-                <span>+${chronosWireProtected.toLocaleString()}</span>
-                <span className="text-xs text-emerald-500 font-normal">SAVED</span>
+                {finVerdict ? (
+                  finVerdict.status === "UNSAT" ? (
+                    <>
+                      <span>+${Number(CARTRIDGE_STEPS.FINTECH.steps[0].arguments.amount_usd).toLocaleString()}</span>
+                      <span className="text-xs text-emerald-500 font-normal">KEPT</span>
+                    </>
+                  ) : (
+                    <span className="text-sm">wire was not blocked</span>
+                  )
+                ) : (
+                  notRun
+                )}
               </div>
-              <div className="mt-2 flex items-center gap-1 text-[10px] text-emerald-300/80">
-                <ShieldCheck className="w-3 h-3 text-emerald-400" />
-                <span>Rogue wire aborted. Escrow funds untouched.</span>
-              </div>
+              {finVerdict?.status === "UNSAT" && (
+                <div className="mt-2 flex items-center gap-1 text-[10px] text-emerald-300/80">
+                  <ShieldCheck className="w-3 h-3 text-emerald-400" />
+                  <span>{finVerdict.violated_invariants.map((v) => v.rule_id).join(", ")}</span>
+                </div>
+              )}
             </div>
 
-            {/* 3. Clinical Hazard Defused */}
             <div className="bg-[#061F17] p-3.5 rounded-lg border border-emerald-800/60 relative overflow-hidden">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-[10px] font-semibold text-emerald-400 flex items-center gap-1.5 uppercase">
@@ -665,114 +530,76 @@ export const SplitScreenDemo: React.FC<SplitScreenDemoProps> = ({
                   Healthcare FHIR
                 </span>
                 <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-950 border border-emerald-800 text-emerald-300 font-bold">
-                  {chronosClinicalSafe ? "HEALED" : "INTERCEPTING"}
+                  {medVerdict?.status ?? "--"}
                 </span>
               </div>
               <div className="text-sm font-bold text-emerald-300 leading-tight">
-                {chronosClinicalSafe ? "Nephrotoxic Hazard Defused" : "Z3 Invariant Checking"}
+                {medVerdict
+                  ? medVerdict.status === "UNSAT"
+                    ? "Contraindicated Rx blocked"
+                    : "Rx was not blocked"
+                  : notRun}
               </div>
-              <div className="mt-2 flex items-center gap-1 text-[10px] text-emerald-400">
-                <span>
-                  {chronosClinicalSafe
-                    ? "Auto-switched to Acetaminophen 650mg (SAT proven)"
-                    : "Verifying contraindication with Z3 Prover..."}
-                </span>
-              </div>
-            </div>
-          </div>
-
-          {/* Green Terminal Logs */}
-          <div className="flex-1 bg-[#02100A] rounded-lg border border-emerald-900/60 p-4 space-y-2 flex flex-col min-h-[220px]">
-            <div className="flex items-center justify-between pb-2 border-b border-emerald-950 text-xs">
-              <span className="flex items-center gap-1.5 font-bold text-emerald-400">
-                <Terminal className="w-3.5 h-3.5 text-emerald-400" />
-                Chronos Kernel Proxy Interception Log
-              </span>
-              <span className="text-[10px] text-emerald-400 font-mono">Rewind Latency: 0.00ms</span>
-            </div>
-
-            <div className="flex-1 overflow-y-auto space-y-1.5 text-[11px] font-mono leading-relaxed text-emerald-300/90 select-text">
-              {liveApiResponse ? (
-                liveApiResponse.active.steps.map((st, i) => (
-                  <div key={i} className="space-y-0.5">
-                    <div className="text-cyan-400 font-semibold">
-                      [STEP {st.step + 1}] Intercepted in Active Lane (CoW RAM Shadow)
-                    </div>
-                    {st.verdict && (
-                      <div
-                        className={
-                          st.verdict.status === "UNSAT"
-                            ? "text-red-400 font-bold"
-                            : "text-emerald-400 font-bold"
-                        }
-                      >
-                        Z3 VERDICT: {st.verdict.status} ({st.verdict.proof_latency_ms}ms)
-                        {st.verdict.violated_invariants?.length > 0 &&
-                          ` // Violated: ${st.verdict.violated_invariants.map((v) => v.rule_id).join(", ")}`}
-                      </div>
-                    )}
-                    {st.verdict?.status === "UNSAT" && (
-                      <div className="text-emerald-400">
-                        CoW Rewind Executed in 0.00ms. Injected UnsatCore remediation hint into LLM context.
-                      </div>
-                    )}
-                    {st.verdict?.status === "SAT" && (
-                      <div className="text-emerald-300 text-[10px]">
-                        Committed Safe. SHA-256 Receipt: {st.verdict.sha256_proof_hash?.slice(0, 24)}...
-                      </div>
-                    )}
-                  </div>
-                ))
-              ) : (
-                <>
-                  <div className="text-slate-500">[00:00:00.100] Intercepted tool call &apos;execute_migration&apos; in 0.38ms</div>
-                  <div className="text-cyan-400">
-                    [00:00:00.101] CoW RAM Disk Fork: SAVEPOINT cow_branch_7f82 pinned on /dev/shm (1.18ms)
-                  </div>
-                  <div className="text-cyan-300">
-                    [00:00:00.102] Applied mutation to isolated shadow branch. Extracted state diff.
-                  </div>
-                  <div className="text-amber-300">
-                    [00:00:00.103] Z3 Theorem Prover evaluated invariants in 1.64ms -&gt; Status: UNSAT!
-                  </div>
-                  <div className="text-red-400 font-semibold">
-                    [00:00:00.103] FAULT CAUGHT IN 3.2ms TOTAL: Violated &apos;INV_OPS_01_DESTRUCTIVE_DDL&apos;
-                  </div>
-                  <div className="text-emerald-400 font-bold">
-                    [00:00:00.103] CO-W REWIND EXECUTED: ROLLBACK TO cow_branch_7f82 in 0.00ms (0 bytes prod damage)
-                  </div>
-                  <div className="text-purple-300">
-                    [00:00:00.104] 1-Turn Self-Healing: Injected UnsatCore remediation hint into agent message history
-                  </div>
-                  <div className="text-cyan-400">
-                    [00:00:00.105] Agent corrective retry: archive_table_soft(&apos;users_archived_2026&apos;)
-                  </div>
-                  <div className="text-emerald-300 font-bold">
-                    [00:00:00.106] Shadow re-evaluation: Z3 PROVEN SAT! Committed to prod with Merkle receipt.
-                  </div>
-                  <div className="p-2 rounded bg-emerald-950/80 border border-emerald-800 text-emerald-200 mt-2 font-bold text-xs flex items-center justify-between">
-                    <span>CHRONOS RECEIPT: SHA-256 e8b29c0177... bound into tamper-evident Merkle log</span>
-                    <span className="text-[10px] text-emerald-400 font-mono">P50: 3.2ms</span>
-                  </div>
-                </>
+              {med?.active.steps[1]?.verdict?.status === "SAT" && (
+                <div className="mt-2 text-[10px] text-emerald-400">
+                  Retry with Linagliptin 5 mg + Encounter/enc_108 proven SAT and committed
+                </div>
               )}
             </div>
           </div>
 
-          {/* Right Summary Box */}
+          <div className="flex-1 bg-[#02100A] rounded-lg border border-emerald-900/60 p-4 space-y-2 flex flex-col min-h-[220px]">
+            <div className="flex items-center justify-between pb-2 border-b border-emerald-950 text-xs">
+              <span className="flex items-center gap-1.5 font-bold text-emerald-400">
+                <Terminal className="w-3.5 h-3.5 text-emerald-400" />
+                ACTIVE lane (Contract 3 verdicts)
+              </span>
+            </div>
+
+            <div className="flex-1 overflow-y-auto space-y-1.5 text-[11px] font-mono leading-relaxed text-emerald-300/90 select-text">
+              {ran.length === 0 && (
+                <div className="text-slate-500">
+                  The same tool calls go through the kernel: SAVEPOINT shadow branch, Z3 proof, then
+                  ROLLBACK on UNSAT or COMMIT with a SHA-256 receipt on SAT.
+                </div>
+              )}
+              {ran.map((r) =>
+                r.active.steps.map((st) => (
+                  <div key={`${r.cartridge_id}-${st.step}`} className="space-y-0.5">
+                    <div className="text-cyan-400 font-semibold">
+                      [{r.cartridge_id} step {st.step + 1}] shadow branch {st.verdict?.shadow_branch_id ?? "--"}
+                    </div>
+                    {st.verdict ? (
+                      <>
+                        <div className={st.verdict.status === "UNSAT" ? "text-red-400 font-bold" : "text-emerald-400 font-bold"}>
+                          Z3 VERDICT: {st.verdict.status} ({st.verdict.proof_latency_ms}ms)
+                          {st.verdict.violated_invariants.length > 0 &&
+                            ` // ${st.verdict.violated_invariants.map((v) => v.rule_id).join(", ")}`}
+                        </div>
+                        <div className={st.verdict.status === "UNSAT" ? "text-emerald-400" : "text-emerald-300 text-[10px]"}>
+                          {st.verdict.status === "UNSAT"
+                            ? "Shadow branch rolled back: 0 rows reached production."
+                            : `Committed. SHA-256 receipt ${st.verdict.sha256_proof_hash.slice(0, 24)}...`}
+                        </div>
+                      </>
+                    ) : (
+                      <div className="text-red-400">FAILED {st.status_code}: {st.error}</div>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
           <div className="p-3 bg-emerald-950/40 rounded-lg border border-emerald-900/40 flex items-center justify-between text-xs">
             <div className="flex items-center gap-2">
-              <span className="text-emerald-400 font-semibold">Production Damage:</span>
+              <span className="text-emerald-400 font-semibold">Production:</span>
               <span className="text-emerald-200 font-bold">
-                {liveApiResponse
-                  ? `0 BYTES (${liveApiResponse.active.committed} Safe Commits, ${liveApiResponse.active.blocked} Blocked Hazards)`
-                  : "0 BYTES (100% Formal Determinism)"}
+                {ran.length > 0 ? `${totalBlocked} hazards blocked, ${totalCommitted} safe commits` : "--"}
               </span>
             </div>
             <div className="text-emerald-400 font-bold numeral-mono text-[11px]">
-              {liveApiResponse
-                ? `Total Comparison Latency: ${liveApiResponse.total_latency_ms}ms`
-                : "Speedup vs LLM Guardrails: 453x Faster"}
+              {ran.length > 0 ? `Both lanes: ${totalLatency.toFixed(1)}ms` : ""}
             </div>
           </div>
         </section>

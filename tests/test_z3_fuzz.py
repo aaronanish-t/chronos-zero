@@ -16,8 +16,12 @@ from __future__ import annotations
 
 import gc
 import random
-import resource
 import sys
+
+try:
+    import resource  # POSIX only; the RSS check is skipped where it is missing (Windows)
+except ImportError:
+    resource = None
 import time
 import tracemalloc
 from pathlib import Path
@@ -226,7 +230,7 @@ def test_fuzz_zero_memory_leak_and_timeout_ceiling_1000_iterations():
     gc.collect()
     tracemalloc.start()
     baseline_mem, _ = tracemalloc.get_traced_memory()
-    start_rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    start_rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss if resource else 0
 
     cartridges = ["HEALTHCARE_FHIR", "FINTECH_ESCROW", "CLOUD_DEVOPS"]
 
@@ -291,7 +295,7 @@ def test_fuzz_zero_memory_leak_and_timeout_ceiling_1000_iterations():
     gc.collect()
     current_mem, peak_mem = tracemalloc.get_traced_memory()
     tracemalloc.stop()
-    end_rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    end_rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss if resource else 0
 
     mem_growth_kb = (current_mem - baseline_mem) / 1024.0
     rss_growth_mb = (end_rss_kb - start_rss_kb) / 1024.0

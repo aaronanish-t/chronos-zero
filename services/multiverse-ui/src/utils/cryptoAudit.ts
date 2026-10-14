@@ -22,15 +22,9 @@ export async function computeEntryHash(
   traceId: string,
   smt2Dump: string,
   status: string,
-  timestampNs: number
+  timestampNs: number | string
 ): Promise<string> {
-  const payload = [
-    prevHash,
-    traceId,
-    smt2Dump,
-    status,
-    timestampNs.toString(),
-  ].join(UNIT_SEPARATOR);
+  const payload = [prevHash, traceId, smt2Dump, status, String(timestampNs)].join(UNIT_SEPARATOR);
   return sha256(payload);
 }
 
@@ -48,90 +42,62 @@ export async function computeMerkleRoot(leaves: string[]): Promise<string> {
     }
     const nextLevel: string[] = [];
     for (let i = 0; i < level.length; i += 2) {
-      const combined = await sha256(level[i] + level[i + 1]);
-      nextLevel.push(combined);
+      nextLevel.push(await sha256(level[i] + level[i + 1]));
     }
     level = nextLevel;
   }
   return level[0];
 }
 
+export interface AuditVerification {
+  data: AuditLogResponse;
+  /** Every entry_hash and prev_hash link recomputed in the browser. */
+  chainVerified: boolean;
+  /** Browser-computed Merkle root equals the kernel's. */
+  rootMatches: boolean;
+  /** This node's audit entry (matched by shadow branch), if it has one. */
+  entry: AuditEntry | null;
+  /** SHA-256(entry.smt2_dump) equals the node's sha256_proof_hash receipt. */
+  receiptMatches: boolean | null;
+}
+
 /**
- * Fetch live audit log from Kernel Proxy (GET /v1/kernel/audit-log)
- * If unreachable, computes deterministic real cryptographic chain from evaluated node data.
+ * GET /v1/kernel/audit-log, then independently re-verify it with WebCrypto: rebuild every
+ * entry hash and link, the Merkle root, and this node's receipt. Throws if the kernel is
+ * unreachable; nothing is reported as verified without the kernel's real chain.
  */
-export async function fetchOrComputeAuditLog(
-  currentNode?: TelemetryNode | null
-): Promise<{ data: AuditLogResponse; source: "KERNEL_API" | "LOCAL_CRYPTO" }> {
-  // 1. Attempt live API call to GET /v1/kernel/audit-log
+export async function fetchAndVerifyAuditLog(node?: TelemetryNode | null): Promise<AuditVerification> {
+  let res: Response;
   try {
-    const endpoints = [
-      "http://localhost:8000/v1/kernel/audit-log",
-      "/v1/kernel/audit-log",
-    ];
-
-    for (const url of endpoints) {
-      try {
-        const res = await fetch(url, {
-          method: "GET",
-          headers: { Accept: "application/json" },
-          signal: AbortSignal.timeout(1200),
-        });
-
-        if (res.ok) {
-          const json: AuditLogResponse = await res.json();
-          if (
-            typeof json.verified === "boolean" &&
-            json.merkle_root &&
-            json.head_hash
-          ) {
-            return { data: json, source: "KERNEL_API" };
-          }
-        }
-      } catch {
-        // try next endpoint
-      }
-    }
-  } catch {
-    // Network/offline fallback
+    res = await fetch("/v1/kernel/audit-log", {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(3000),
+    });
+  } catch (e) {
+    throw new Error(`kernel unreachable (${(e as Error).message})`);
   }
+  if (!res.ok) throw new Error(`audit log unavailable (HTTP ${res.status})`);
+  // timestamp_ns (~1.8e18) is beyond Number.MAX_SAFE_INTEGER: JSON.parse would round it and
+  // every recomputed entry hash would mismatch. Keep those digits as strings.
+  const raw = (await res.text()).replace(/"timestamp_ns"\s*:\s*(\d+)/g, '"timestamp_ns":"$1"');
+  const data = JSON.parse(raw) as AuditLogResponse;
 
-  // 2. Real cryptographic fallback: Compute real SHA-256 chain from current node
-  const timestampNs = (currentNode?.timestamp ?? Date.now()) * 1_000_000;
-  const traceId = (currentNode?.id as string) ?? "tr_chronos_001";
-  const smt2 = currentNode?.smt2_dump ?? "; Genesis Z3 Verification";
-  const status = currentNode?.z3_verdict ?? "SAT";
+  let prev = GENESIS_HASH;
+  let chainVerified = true;
+  for (const [position, e] of data.entries.entries()) {
+    const expected = await computeEntryHash(prev, e.trace_id, e.smt2_dump, e.status, e.timestamp_ns);
+    if (e.index !== position || e.prev_hash !== prev || e.entry_hash !== expected) {
+      chainVerified = false;
+      break;
+    }
+    prev = e.entry_hash;
+  }
+  const rootMatches = (await computeMerkleRoot(data.entries.map((e) => e.entry_hash))) === data.merkle_root;
 
-  const entryHash1 = await computeEntryHash(
-    GENESIS_HASH,
-    traceId,
-    smt2,
-    status,
-    timestampNs
-  );
+  const branchId = node?.id?.startsWith("node_") ? node.id.slice("node_".length) : null;
+  const entry = branchId ? data.entries.find((e) => e.shadow_branch_id === branchId) ?? null : null;
+  const receiptMatches =
+    entry && node?.sha256_proof_hash ? (await sha256(entry.smt2_dump)) === node.sha256_proof_hash : null;
 
-  const entry: AuditEntry = {
-    index: 0,
-    trace_id: traceId,
-    shadow_branch_id: `cow_${traceId.slice(-8)}`,
-    status,
-    timestamp_ns: timestampNs,
-    smt2_dump: smt2,
-    prev_hash: GENESIS_HASH,
-    entry_hash: entryHash1,
-  };
-
-  const calculatedRoot = await computeMerkleRoot([entryHash1]);
-
-  return {
-    data: {
-      length: 1,
-      genesis_hash: GENESIS_HASH,
-      head_hash: entryHash1,
-      merkle_root: calculatedRoot,
-      verified: true,
-      entries: [entry],
-    },
-    source: "LOCAL_CRYPTO",
-  };
+  return { data, chainVerified, rootMatches, entry, receiptMatches };
 }

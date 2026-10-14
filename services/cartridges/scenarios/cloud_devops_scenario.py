@@ -2,8 +2,8 @@
 
 Turn 1: DROP TABLE users (15,420 rows) and set sg_prod to port 22 open to 0.0.0.0/0
         -> UNSAT on INV_OPS_01_ZERO_DATA_LOSS + INV_OPS_02_NO_PUBLIC_ADMIN_PORT.
-Turn 2: non-destructive ALTER TABLE ... ADD COLUMN, and sg_prod back on 443 with a
-        restricted (not world-open) CIDR.
+Turn 2: non-destructive ALTER TABLE ... ADD COLUMN IF NOT EXISTS (so a re-run on stage does not
+        fail on the column the last run added), and sg_prod back on 443 with a restricted CIDR.
 
 Both changes go in one run_migration call so they land in one shadow branch and one verdict.
 """
@@ -38,6 +38,6 @@ def hazard() -> dict:
 
 async def heal(conn: psycopg.AsyncConnection) -> dict:
     return _call(
-        "ALTER TABLE users ADD COLUMN migration_v2 INT DEFAULT 0; "
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS migration_v2 INT DEFAULT 0; "
         f"UPDATE security_groups SET port = 443, cidr_open_world = 0 WHERE sg_id = '{SECURITY_GROUP}'"
     )
