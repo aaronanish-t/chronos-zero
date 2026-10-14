@@ -1,0 +1,86 @@
+# CHRONOS-ZERO System Constitution & Agent Operating Manual
+
+## 1. System Identity & Core Mission
+You are operating inside **CHRONOS-ZERO**: *The Speculative Execution & Formal Verification Kernel for High-Stakes Autonomous AI*.
+* **Core Mechanism**: Intercept agent tool calls (`< 1.5ms`) -> Fork in-memory Copy-on-Write (CoW) shadow state (`< 1.5ms`) -> Verify post-mutation state delta via Microsoft Z3 SMT Theorem Prover (`< 2.5ms`) -> Commit (`SAT`) or Rewind + Self-Heal (`UNSAT`).
+* **Golden Rule**: Never substitute deterministic Z3 mathematical proofs or real SQLite `SAVEPOINT` rollbacks with probabilistic LLM prompts or simulated delays. Every verification must produce a real SMT-LIB2 dump, a tracked `UnsatCore`, and a SHA-256 receipt.
+
+---
+
+## 2. Worktree Ownership & Directory Write-Locks
+This repository is developed in parallel by 4 engineers across 4 isolated Git branches. **NEVER modify files outside your active branch's owned directory** unless explicitly executing a Merge Gate sync.
+
+| Branch / Worktree | Agent Persona | Owned Paths (READ/WRITE) | Read-Only Paths |
+| :--- | :--- | :--- | :--- |
+| `feat/e1-kernel` | `@kernel-agent` | `services/kernel-proxy/`, `contracts/`, `Makefile`, `docker-compose.yml` | `services/z3-verifier/`, `services/cartridges/`, `services/multiverse-ui/` |
+| `feat/e2-z3-prover` | `@z3-formal-agent` | `services/z3-verifier/`, `tests/test_z3_*` | `contracts/`, `services/kernel-proxy/` |
+| `feat/e3-cartridges` | `@cartridge-agent` | `services/cartridges/`, `tests/test_e2e_*` | `contracts/`, `services/kernel-proxy/`, `services/z3-verifier/` |
+| `feat/e4-multiverse-ui` | `@multiverse-ui-agent` | `services/multiverse-ui/` | `contracts/` |
+
+---
+
+## 3. Immutable Data Contracts (Strict Schema Lock)
+All inter-service communication MUST validate against Pydantic v2 (Python) and Zod/TypeScript interfaces derived from `/contracts/`. **Field renaming is strictly forbidden.**
+
+1. **Contract 1 (`POST http://localhost:8000/v1/kernel/execute`)**:
+   * Required root keys: `trace_id` (`str`), `timestamp_ns` (`int`), `cartridge_id` (`Literal["HEALTHCARE_FHIR", "FINTECH_ESCROW", "CLOUD_DEVOPS"]`), `chronos_mode` (`Literal["ACTIVE", "BYPASS"]`), `agent_id` (`str`), `tool_call` (`dict` with `tool_name`, `target_resource`, `arguments`).
+2. **Contract 2 (`POST http://localhost:8001/v1/z3/verify`)**:
+   * Required root keys: `trace_id` (`str`), `shadow_branch_id` (`str`), `cartridge_id` (`str`), `cow_fork_latency_ms` (`float`), `state_pre` (`dict`), `state_post_shadow` (`dict`).
+3. **Contract 3 (Z3 Response & Kernel Return)**:
+   * Required root keys: `trace_id` (`str`), `shadow_branch_id` (`str`), `status` (`Literal["SAT", "UNSAT"]`), `proof_latency_ms` (`float`), `violated_invariants` (`list[ViolatedInvariant]`), `smt2_dump` (`str`), `sha256_proof_hash` (`str`).
+4. **Contract 4 (`WS ws://localhost:8000/ws/telemetry`)**:
+   * Required root keys: `event_type` (`Literal["BRANCH_EVALUATED", "BYPASS_CORRUPTED", "POLICY_COMPILED", "DEMO_RESET"]`), `trace_id` (`str`), `cartridge_id` (`str`), `node` (`dict` with `id`, `parent_id`, `branch_type`, `action_label`, `total_latency_ms`, `z3_verdict`, `violated_rules`, `financial_loss_prevented_usd`, `clinical_hazard_prevented`).
+
+---
+
+## 4. Non-Negotiable Engineering Invariants
+
+### 4.1 Kernel & CoW Engine (`services/kernel-proxy/`)
+* **Storage Path**: All SQLite databases MUST reside on Linux RAM disk (`/dev/shm/chronos_{cartridge_id}.db`) with `PRAGMA journal_mode=WAL;` and `PRAGMA synchronous=NORMAL;`.
+* **Connection Pinning**: SQLite `SAVEPOINT` transactions are connection-scoped. A shadow branch MUST pin its dedicated SQLite connection object in an in-memory dictionary (`active_branches[shadow_branch_id] = conn`) from `SAVEPOINT cow_branch_X` until `RELEASE` or `ROLLBACK TO` completes.
+* **Timing Precision**: Use `time.perf_counter_ns()` divided by `1_000_000.0` for all latency telemetry. Never use `time.time()` for sub-millisecond measurement.
+
+### 4.2 Z3 Formal Verifier (`services/z3-verifier/`)
+* **Tracked Assertions Only**: Never use bare `solver.add()` for business/safety invariants. Always use `solver.assert_and_track(boolean_expr, "INV_ID_NAME")` so `solver.unsat_core()` deterministically extracts every violated rule ID on `UNSAT`.
+* **Hard Solver Timeout**: Every `Solver()` instance MUST set `s.set("timeout", 50)` (50 milliseconds) to prevent undecidable non-linear arithmetic from hanging the kernel.
+* **Explicit Type Casting**: Cast all incoming JSON floats to `z3.RealVal(val)` and ints to `z3.IntVal(val)` to avoid Python float-precision solver mismatches.
+
+### 4.3 Domain Cartridges & Orchestrator (`services/cartridges/`)
+* **1-Turn Self-Healing**: When `chronos_mode == "ACTIVE"` and the kernel returns `status == "UNSAT"`, the agent orchestrator MUST automatically append the `violated_invariants` and `remediation_hint` into the agent message history and trigger a corrective tool call without human intervention.
+* **Offline Determinism**: Wrap all external LLM calls (Opus 5.5 / GPT 6 Astra) with `DeterministicReplayMiddleware` backed by `/services/cartridges/replay_cache.sqlite`. If `OFFLINE_MODE=1` or network latency exceeds `1500ms`, serve the cached tool-call trajectory immediately.
+
+### 4.4 Multiverse UI (`services/multiverse-ui/`)
+* **Zero Polling**: All DAG updates and telemetry counters must update reactively via the single WebSocket stream (`ws://localhost:8000/ws/telemetry`).
+* **Visual Semantics**:
+  * `SHADOW_REJECTED` (`UNSAT`): Crimson (`#EF4444`), dashed animated edge, branches downward-right (`+120px Y`), displays `UnsatCore` badge.
+  * `COMMITTED_SAFE` (`SAT`): Emerald (`#10B981`), solid edge, continues on primary horizontal axis (`0px Y`), displays SHA-256 receipt badge.
+  * `BYPASS_CORRUPTED`: Flashing crimson banner with live capital/data loss counter.
+
+---
+
+## 5. Standard Commands & Verification Gates
+Run these commands from the repository root before opening any PR or calling a Merge Gate:
+
+```bash
+# 1. Seed all 3 in-memory /dev/shm cartridge databases (< 0.5s)
+make seed
+
+# 2. Validate JSON Schema parity across Python Pydantic & TypeScript interfaces
+make test-contracts
+
+# 3. Run Z3 formal invariant unit tests (SAT, UNSAT, Boundary, Fuzz)
+pytest tests/test_z3_invariants.py -v
+
+# 4. Run 500-iteration CoW + Z3 latency benchmark (Gate: P50 < 3.5ms, P99 < 8.0ms)
+pytest tests/test_cow_latency.py -s
+
+# 5. Run End-to-End 3-Cartridge Self-Healing Test
+pytest tests/test_e2e_self_healing.py -v
+```
+
+---
+
+## 6. Dual-Model Prompting Protocol (Opus 5.5 + GPT 6 Astra)
+* **Builder Step (Claude Opus 5.5)**: Use for implementation. Always include `@AGENTS.md` and the relevant skill from `@SKILLS.md` in context.
+* **Auditor Step (GPT 6 Astra)**: Before committing on any branch, run:
+  > *"Act as `@redteam-auditor`. Inspect `git diff` against `@AGENTS.md` Section 3 (Contracts) and Section 4 (Invariants). Flag any blocking I/O, untracked Z3 assertions, unpinned SQLite savepoints, or schema key mismatches."*
