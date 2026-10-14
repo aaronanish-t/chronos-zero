@@ -16,6 +16,7 @@ import { MultiverseNode } from "./MultiverseNode";
 import { DAGNode, DAGEdge } from "../hooks/useChronosWS";
 import { TelemetryNode } from "../types/contracts";
 import { AlertTriangle, X } from "lucide-react";
+export { MultiverseDAG } from "./MultiverseDAG";
 
 interface MultiverseCanvasProps {
   nodes: DAGNode[];

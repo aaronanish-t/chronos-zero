@@ -17,7 +17,7 @@ export interface DAGNode {
   id: string;
   data: TelemetryNode;
   position: NodePosition;
-  type: "multiverseNode";
+  type: string;
 }
 
 export interface DAGEdge {
@@ -80,7 +80,7 @@ export function useChronosWS() {
   const calculateNodePosition = useCallback(
     (node: TelemetryNode, parentNode?: DAGNode): NodePosition => {
       if (!parentNode) {
-        return { x: 80, y: 260 };
+        return { x: 80, y: 220 };
       }
 
       const pX = parentNode.position.x;
@@ -88,16 +88,16 @@ export function useChronosWS() {
 
       switch (node.branch_type) {
         case "SHADOW_REJECTED":
-          // Branch downward-right (+130px Y per AGENTS.md / SKILLS.md)
-          return { x: pX + 280, y: pY + 130 };
+          // Branch downward-right (parent.x + 320, parent.y + 150)
+          return { x: pX + 320, y: pY + 150 };
         case "COMMITTED_SAFE":
           // Continues on primary horizontal axis (0px Y delta)
-          return { x: pX + 280, y: pY };
+          return { x: pX + 320, y: pY };
         case "BYPASS_CORRUPTED":
-          return { x: pX + 280, y: pY + 260 };
+          return { x: pX + 320, y: pY + 280 };
         case "ROOT":
         default:
-          return { x: pX + 280, y: pY };
+          return { x: pX + 320, y: pY };
       }
     },
     []
@@ -156,11 +156,18 @@ export function useChronosWS() {
 
         const position = calculateNodePosition(rawNode, parentNode);
 
+        let nodeType = "committedSafeNode";
+        if (rawNode.branch_type === "SHADOW_REJECTED") {
+          nodeType = "shadowRejectedNode";
+        } else if (rawNode.branch_type === "ROOT") {
+          nodeType = "rootOriginNode";
+        }
+
         const newDAGNode: DAGNode = {
           id: rawNode.id,
           data: rawNode,
           position,
-          type: "multiverseNode",
+          type: nodeType,
         };
 
         return [...currentNodes, newDAGNode];
@@ -187,10 +194,10 @@ export function useChronosWS() {
             id: edgeId,
             source: rawNode.parent_id!,
             target: rawNode.id,
-            animated: isRejected || isCorrupted,
+            animated: isRejected,
             style: {
               stroke: edgeColor,
-              strokeWidth: isRejected ? 2 : 3,
+              strokeWidth: isRejected ? 2.5 : 3,
               strokeDasharray: isRejected ? "6 4" : undefined,
             },
           };

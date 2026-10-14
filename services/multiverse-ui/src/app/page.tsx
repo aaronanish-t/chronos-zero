@@ -3,7 +3,7 @@
 import React, { useState } from "react";
 import { useChronosWS } from "../hooks/useChronosWS";
 import { TopTelemetryBar } from "../components/TopTelemetryBar";
-import { MultiverseCanvas } from "../components/MultiverseCanvas";
+import { MultiverseDAG } from "../components/MultiverseDAG";
 import { Z3ProofInspector } from "../components/Z3ProofInspector";
 import { LivePolicyStudio } from "../components/LivePolicyStudio";
 
@@ -43,8 +43,8 @@ export default function MissionControlPage() {
 
       {/* Center Layout: ReactFlow Canvas (Panel 2) + Right Z3 Proof Drawer (Panel 3) */}
       <div className="flex flex-1 min-h-0 relative overflow-hidden">
-        {/* Panel 2: Center ReactFlow Canvas */}
-        <MultiverseCanvas
+        {/* Panel 2: Center ReactFlow Canvas (MultiverseDAG) */}
+        <MultiverseDAG
           nodes={nodes}
           edges={edges}
           selectedNode={selectedNode}
