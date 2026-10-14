@@ -543,3 +543,17 @@ def test_cloud_devops_10_boundary_exact_row_delta_minus_one_fails():
     assert res["status"] == "UNSAT"
     assert get_rule_ids(res) == {"INV_OPS_01_ZERO_DATA_LOSS"}
     assert res["proof_latency_ms"] < 5.0
+
+
+@pytest.mark.parametrize("drop_key, where", [("daily_escrow_limit_usd", "pre"), ("vendor_latency_ms", "post")])
+def test_fintech_missing_cap_or_sla_fails_closed(drop_key, where):
+    """A wire whose cap or SLA latency is unknown is rejected, never passed on a default value."""
+    pre = {"daily_escrow_spent_usd": 0.0, "daily_escrow_limit_usd": 5000.0}
+    post = {"transfer_amount_usd": 100.0, "vendor_latency_ms": 50.0, "iban_allowlisted": True}
+    (pre if where == "pre" else post).pop(drop_key)
+    verdict = verify_state_diff({
+        "trace_id": "tr_missing", "shadow_branch_id": "cow_branch_missing", "cartridge_id": "FINTECH_ESCROW",
+        "cow_fork_latency_ms": 0.1, "state_pre": pre, "state_post_shadow": post,
+    })
+    assert verdict["status"] == "UNSAT"
+    assert [v["rule_id"] for v in verdict["violated_invariants"]] == ["INV_SYS_00_MALFORMED_STATE"]

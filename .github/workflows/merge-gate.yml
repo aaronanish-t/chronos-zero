@@ -1,0 +1,60 @@
+# Merge Gate checks (AGENTS.md section 5) on every push and pull request.
+# A contract edited in one place (JSON Schema, Pydantic or TypeScript) without the others fails
+# `contracts`; a kernel / Z3 / cartridge regression fails `backend`; a UI type or build error fails `ui`.
+name: merge-gate
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r services/z3-verifier/requirements.txt
+      - name: Contract parity (JSON Schema == Pydantic == TypeScript)
+        run: python -m pytest tests/test_contract_parity.py -v
+
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >
+          pip install -r services/kernel-proxy/requirements.txt
+          -r services/z3-verifier/requirements.txt
+          -r services/cartridges/requirements.txt
+      - name: RAM-backed PostgreSQL 16 + audit DB
+        run: docker compose up -d --wait postgres audit-db
+      - name: Seed cartridge databases
+        run: python services/cartridges/seed_databases.py
+      - name: Test suite (kernel, Z3, cartridges, live stack with airplane-mode guard)
+        run: python -m pytest tests -q --ignore=tests/test_cow_latency.py
+      - name: Latency benchmark (report only; hardware-dependent, not a gate on CI runners)
+        if: always()
+        continue-on-error: true
+        run: python -m pytest tests/test_cow_latency.py -s -q
+
+  ui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/multiverse-ui
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: services/multiverse-ui/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit -p .
+      - run: npx next build
