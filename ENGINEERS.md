@@ -15,7 +15,7 @@ Merge gates: **G1** H02 contract lock · **G2** H10 kernel↔Z3 sub-5 ms · **G3
 |---|---|---|
 | H00–02 | Init repo, write `contracts/*.json` | [x] |
 | H00–02 | FastAPI skeleton + mock WebSocket emitter | [ ] |
-| H02–06 | SQLite WAL savepoint engine (`cow_engine.py`) | [~] fork/resolve done; no RAM-disk path config or connection pool yet |
+| H02–06 | PostgreSQL savepoint engine (`cow_engine.py`, psycopg async pool) | [ ] SQLite version on `feat/e1-kernel` must be ported (storage switched to Postgres) |
 | H06–10 | `interceptor.py`: `POST /v1/kernel/execute`, call Z3 at `:8001/v1/z3/verify`, resolve savepoint on verdict | [ ] |
 | H06–10 | `BYPASS` mode: write directly, emit `BYPASS_CORRUPTED` | [ ] |
 | H10–16 | `saga_ledger.py` (inverse map for HTTP mutations) | [ ] |
@@ -24,7 +24,7 @@ Merge gates: **G1** H02 contract lock · **G2** H10 kernel↔Z3 sub-5 ms · **G3
 | H26–30 | Wire Fintech + Cloud DevOps cartridges into `cow_engine.py` | [ ] |
 | H30–38 | 500-call latency benchmark (`test_cow_latency.py`), tune async pool | [ ] |
 | H38–44 | Chaos tests: fast cartridge switching, malformed input, Wi-Fi kill | [ ] |
-| — | `docker-compose.yml`, full `Makefile` (`up`, `seed`, `bench`) | [~] Makefile has test targets only |
+| — | `docker-compose.yml` (RAM-backed Postgres 16), full `Makefile` (`db-up`, `seed`, `bench`) | [~] Postgres compose + `db-*`/`seed` targets done; `up`, `bench` not yet |
 
 **Gate duties:** owns G1 merge; pairs with E2 at H06 (state keys ↔ Z3 vars) and G2.
 
@@ -63,8 +63,8 @@ Merge gates: **G1** H02 contract lock · **G2** H10 kernel↔Z3 sub-5 ms · **G3
 
 | Window | Task | Status |
 |---|---|---|
-| H00–02 | SQLite schemas for Healthcare, Fintech, Cloud Ops | [ ] |
-| H00–02 | `seed_databases.py` (deterministic, < 0.5 s, `make seed`) | [ ] |
+| H00–02 | PostgreSQL schemas for Healthcare, Fintech, Cloud Ops | [ ] |
+| H00–02 | `seed_databases.py` (deterministic, `COPY` bulk load into Postgres, < 0.5 s, `make seed`) | [ ] |
 | H02–06 | Healthcare + Fintech mock REST/DB mutation handlers | [ ] |
 | H06–10 | LangGraph agent loop (`orchestrator.py`) with UNSAT retry handler | [ ] |
 | H10–16 | Script the 3 adversarial scenarios, verify 1-turn self-healing | [ ] |
