@@ -35,6 +35,8 @@ from contracts.schemas import (  # noqa: E402
     Z3VerdictResponse,
 )
 from cow_engine import CARTRIDGE_HANDLERS, CoWBranchEngine  # noqa: E402
+from crypto_audit import AuditChain  # noqa: E402
+from saga_ledger import SagaLedger  # noqa: E402
 
 Z3_VERIFY_URL = os.environ.get("CHRONOS_Z3_URL", "http://127.0.0.1:8001/v1/z3/verify")
 Z3_TIMEOUT_S = 2.0
@@ -129,6 +131,8 @@ def create_app(
 ) -> FastAPI:
     engine = CoWBranchEngine(pg_dsn)
     hub = TelemetryHub()
+    audit = AuditChain()
+    saga = SagaLedger()  # compensation registry for non-SQL external API tools
     last_committed_node: dict[str, str] = {}  # agent_id -> id of the agent's last production change
 
     @asynccontextmanager
@@ -145,6 +149,8 @@ def create_app(
     app = FastAPI(title="CHRONOS-ZERO Kernel Proxy", version="0.2.0", lifespan=lifespan)
     app.state.engine = engine
     app.state.hub = hub
+    app.state.audit = audit
+    app.state.saga = saga
 
     def _node(req: InterceptRequest, node_id: str, **fields: Any) -> TelemetryNodePayload:
         return TelemetryNodePayload(
@@ -226,6 +232,9 @@ def create_app(
                 detail=f"Z3 verification failed; shadow branch {branch_id} rolled back: {verify_error}",
             )
 
+        # Kernel-attested time, not the agent-supplied Contract 1 timestamp.
+        audit.append(req.trace_id, branch_id, verdict.smt2_dump, verdict.status, time.time_ns())
+
         unsat = verdict.status == "UNSAT"
         node = _node(
             req,
@@ -254,6 +263,10 @@ def create_app(
             pass
         finally:
             hub.disconnect(ws)
+
+    @app.get("/v1/kernel/audit-log")
+    async def audit_log() -> dict[str, Any]:
+        return audit.export()
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
