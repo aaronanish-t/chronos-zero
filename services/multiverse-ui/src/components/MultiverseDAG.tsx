@@ -398,7 +398,7 @@ export const MultiverseDAG: React.FC<MultiverseDAGProps> = ({
             Multiverse DAG Ready
           </p>
           <p className="text-xs text-slate-500 max-w-sm">
-            Listening on ws://127.0.0.1:8000/ws/telemetry. Press Run Scenario (Space) to send the agent&apos;s tool call through the kernel and watch the shadow branch fork, prove and self-heal.
+            Listening for live kernel telemetry. Press Run Scenario (Space) to send the agent&apos;s tool call through the kernel and watch the shadow branch fork, prove and self-heal.
           </p>
         </div>
       )}

@@ -42,7 +42,12 @@ def build_fintech_solver(
     s.set("timeout", SOLVER_TIMEOUT_MS)
 
     spent_val = float(state_pre.get("daily_escrow_spent_usd", state_pre.get("daily_spent", 0.0)))
-    limit_val = float(state_pre.get("daily_escrow_limit_usd", state_pre.get("daily_limit", 50000.0)))
+    # Fail closed: no default cap or SLA latency. A missing value would otherwise pass a wire
+    # (a 50,000 cap / 0 ms latency); KeyError becomes INV_SYS_00_MALFORMED_STATE (UNSAT).
+    limit_raw = state_pre.get("daily_escrow_limit_usd", state_pre.get("daily_limit"))
+    if limit_raw is None:
+        raise KeyError("daily_escrow_limit_usd is required in state_pre")
+    limit_val = float(limit_raw)
 
     # Handle transfer amount field variations
     transfer_raw = state_post.get("transfer_amount_usd")
@@ -50,7 +55,9 @@ def build_fintech_solver(
         transfer_raw = state_post.get("last_transfer_amount_usd", state_post.get("transfer_amount", 0.0))
     transfer_val = float(transfer_raw)
 
-    latency_raw = state_post.get("vendor_latency_ms", state_post.get("vendor_sla_latency_ms", 0.0))
+    latency_raw = state_post.get("vendor_latency_ms", state_post.get("vendor_sla_latency_ms"))
+    if latency_raw is None:
+        raise KeyError("vendor_latency_ms is required in state_post_shadow")
     latency_val = float(latency_raw)
 
     allowlisted_val = bool(state_post.get("iban_allowlisted", False))
