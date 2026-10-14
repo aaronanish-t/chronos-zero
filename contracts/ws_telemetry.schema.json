@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "chronos-zero/contracts/ws_telemetry.schema.json",
+  "title": "Contract 4: WebSocket UI Telemetry Event",
+  "description": "Pushed over ws://localhost:8000/ws/telemetry",
+  "type": "object",
+  "required": ["event_type", "trace_id", "cartridge_id", "node"],
+  "additionalProperties": false,
+  "properties": {
+    "event_type": { "enum": ["BRANCH_EVALUATED", "BYPASS_CORRUPTED"] },
+    "trace_id": { "type": "string" },
+    "cartridge_id": { "enum": ["HEALTHCARE_FHIR", "FINTECH_ESCROW", "CLOUD_DEVOPS"] },
+    "node": {
+      "type": "object",
+      "required": ["id", "parent_id", "branch_type", "action_label", "total_latency_ms", "z3_verdict", "violated_rules", "financial_loss_prevented_usd", "clinical_hazard_prevented"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "parent_id": { "type": ["string", "null"] },
+        "branch_type": { "enum": ["ROOT", "SHADOW_REJECTED", "COMMITTED_SAFE", "BYPASS_CORRUPTED"] },
+        "action_label": { "type": "string" },
+        "total_latency_ms": { "type": "number", "minimum": 0 },
+        "z3_verdict": { "enum": ["SAT", "UNSAT", "TIMEOUT", "ERROR", "NONE"] },
+        "violated_rules": { "type": "array", "items": { "type": "string" } },
+        "financial_loss_prevented_usd": { "type": "number", "minimum": 0 },
+        "clinical_hazard_prevented": { "type": "boolean" }
+      }
+    }
+  }
+}

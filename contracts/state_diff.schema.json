@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "chronos-zero/contracts/state_diff.schema.json",
+  "title": "Contract 2: Kernel-to-Z3 State Diff Payload",
+  "description": "Body of POST /v1/z3/verify. Field set is per cartridge; the healthcare fields are shown in the spec.",
+  "type": "object",
+  "required": ["trace_id", "shadow_branch_id", "cartridge_id", "cow_fork_latency_ms", "state_pre", "state_post_shadow"],
+  "additionalProperties": false,
+  "properties": {
+    "trace_id": { "type": "string" },
+    "shadow_branch_id": { "type": "string" },
+    "cartridge_id": { "enum": ["HEALTHCARE_FHIR", "FINTECH_ESCROW", "CLOUD_DEVOPS"] },
+    "cow_fork_latency_ms": { "type": "number", "minimum": 0 },
+    "state_pre": { "type": "object" },
+    "state_post_shadow": { "type": "object" }
+  }
+}

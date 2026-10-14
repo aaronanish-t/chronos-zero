@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "chronos-zero/contracts/intercept_payload.schema.json",
+  "title": "Contract 1: Interceptor Request Payload",
+  "description": "Body of POST /v1/kernel/execute",
+  "type": "object",
+  "required": ["trace_id", "timestamp_ns", "cartridge_id", "chronos_mode", "agent_id", "tool_call"],
+  "additionalProperties": false,
+  "properties": {
+    "trace_id": { "type": "string", "pattern": "^tr_[A-Za-z0-9]+$" },
+    "timestamp_ns": { "type": "integer", "minimum": 0, "description": "Unix time in nanoseconds" },
+    "cartridge_id": { "enum": ["HEALTHCARE_FHIR", "FINTECH_ESCROW", "CLOUD_DEVOPS"] },
+    "chronos_mode": { "enum": ["ACTIVE", "BYPASS"] },
+    "agent_id": { "type": "string", "minLength": 1 },
+    "tool_call": {
+      "type": "object",
+      "required": ["tool_name", "target_resource", "arguments"],
+      "additionalProperties": false,
+      "properties": {
+        "tool_name": { "type": "string", "minLength": 1 },
+        "target_resource": { "type": "string", "minLength": 1 },
+        "arguments": { "type": "object" }
+      }
+    }
+  }
+}
