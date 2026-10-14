@@ -1,57 +1,443 @@
-"""Copy-on-write shadow branches using SQLite savepoints.
+# services/kernel-proxy/cow_engine.py
+"""Copy-on-Write shadow branches on PostgreSQL 16 (AGENTS.md §4.1, @skill:scaffold-cow-savepoint).
 
-fork_and_simulate applies a mutation inside SAVEPOINT cow_branch_{id} and keeps it
-open so the Z3 verdict can decide: resolve_branch(commit=True) releases it,
-commit=False rolls it back. Nothing is committed to production before the verdict.
+Each branch takes a dedicated pooled connection, runs one REPEATABLE READ transaction with a
+named SAVEPOINT, and stays pinned in self._pinned until resolve(): SAT -> RELEASE + COMMIT,
+otherwise ROLLBACK. The connection returns to the pool only after COMMIT/ROLLBACK.
 """
-
-import sqlite3
+import os
+import re
 import time
 import uuid
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable, Iterable, Optional
+
+from psycopg import AsyncConnection, IsolationLevel, sql
+from psycopg.rows import dict_row
+from psycopg_pool import AsyncConnectionPool
+
+DEFAULT_PG_DSN = "postgresql://chronos_kernel:chronos_kernel@127.0.0.1:5432"
+CARTRIDGE_IDS = ("HEALTHCARE_FHIR", "FINTECH_ESCROW", "CLOUD_DEVOPS")
+# Pre-warmed so a burst of branches does not pay connection setup; 3 pools x 24 stays well
+# under the demo server's max_connections=100.
+POOL_MIN_SIZE = 8
+POOL_MAX_SIZE = 24
+POOL_GETCONN_TIMEOUT_S = 2.0
+SANDBOX_PREFIX = "bypass_"
+_SANDBOX_NAME = re.compile(r"^bypass_[0-9a-f]{12}$")
+
+# Handlers receive the full Contract 1 tool_call: {"tool_name", "target_resource", "arguments"}.
+StateReader = Callable[[AsyncConnection, dict[str, Any]], Awaitable[dict[str, Any]]]
+Mutation = Callable[[AsyncConnection, dict[str, Any]], Awaitable[Optional[dict[str, Any]]]]
 
 
-class CowEngine:
-    def __init__(self, db_path: str):
-        # isolation_level=None gives us manual transaction control for SAVEPOINT.
-        self.conn = sqlite3.connect(db_path, isolation_level=None, check_same_thread=False)
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA synchronous=NORMAL")
-        self._open: dict[str, str] = {}
+def database_name(cartridge_id: str) -> str:
+    return f"chronos_{cartridge_id.lower()}"
 
-    def fork_and_simulate(self, state_query: str, mutation_sql: str, mutation_params=(), post_query: str = None):
-        """Apply a mutation inside a savepoint and return (branch_id, state_pre, state_post, latency_ms).
 
-        state_query / post_query must return a single row; the result is returned as a dict.
-        The savepoint is left open until resolve_branch is called.
+async def _configure(conn: AsyncConnection) -> None:
+    await conn.set_isolation_level(IsolationLevel.REPEATABLE_READ)
+    # Lock/statement bounds (AGENTS.md §4.1) set once per pooled connection rather than per
+    # branch: saves two round trips on every fork. Agent SQL cannot change them (SET is rejected).
+    await conn.execute("SET lock_timeout = '2s'; SET statement_timeout = '2s'")
+    await conn.commit()
+
+
+class CoWBranchEngine:
+    def __init__(self, dsn_base: Optional[str] = None, cartridge_ids: Iterable[str] = CARTRIDGE_IDS) -> None:
+        dsn_base = (dsn_base or os.environ.get("CHRONOS_PG_DSN") or DEFAULT_PG_DSN).rstrip("/")
+        self._pools = {
+            cid: AsyncConnectionPool(
+                f"{dsn_base}/{database_name(cid)}",
+                min_size=POOL_MIN_SIZE,
+                max_size=POOL_MAX_SIZE,
+                open=False,
+                kwargs={"row_factory": dict_row},
+                configure=_configure,
+            )
+            for cid in cartridge_ids
+        }
+        self._pinned: dict[str, tuple[str, AsyncConnection]] = {}
+
+    async def open(self) -> None:
+        # wait=False: the kernel starts even if Postgres is still booting; requests then fail closed.
+        for pool in self._pools.values():
+            await pool.open(wait=False)
+
+    async def close(self) -> None:
+        for branch_id in list(self._pinned):
+            await self.resolve(branch_id, commit=False)
+        for pool in self._pools.values():
+            await pool.close()
+
+    async def fork_and_mutate(
+        self,
+        cartridge_id: str,
+        state_reader_fn: StateReader,
+        mutation_fn: Mutation,
+        tool_call: dict[str, Any],
+    ) -> tuple[str, dict[str, Any], dict[str, Any], float]:
+        t0 = time.perf_counter_ns()
+        branch_id = f"cow_branch_{uuid.uuid4().hex[:8]}"
+        pool = self._pools[cartridge_id]
+        conn = await pool.getconn(timeout=POOL_GETCONN_TIMEOUT_S)
+        try:
+            # psycopg opens the REPEATABLE READ transaction on the first statement.
+            state_pre = await state_reader_fn(conn, tool_call)
+            # Pipelined: SAVEPOINT, the mutation and the post-state read are sent without waiting
+            # on each other; only a statement whose result is fetched forces a round trip.
+            async with conn.pipeline():
+                await conn.execute(f"SAVEPOINT {branch_id}")
+                overlays = await mutation_fn(conn, tool_call)
+                state_post = await state_reader_fn(conn, tool_call)
+            if overlays:
+                state_post.update(overlays)
+        except BaseException:
+            await conn.rollback()
+            await pool.putconn(conn)
+            raise
+
+        self._pinned[branch_id] = (cartridge_id, conn)
+        return branch_id, state_pre, state_post, round((time.perf_counter_ns() - t0) / 1_000_000.0, 3)
+
+    async def resolve(self, branch_id: str, commit: bool) -> float:
+        t0 = time.perf_counter_ns()
+        pinned = self._pinned.pop(branch_id, None)
+        if pinned is None:
+            raise KeyError(f"Shadow branch '{branch_id}' not found or already resolved.")
+        cartridge_id, conn = pinned
+        try:
+            if commit:
+                # Not pipelined: measured slower than two plain round trips (pipeline setup/sync cost).
+                await conn.execute(f"RELEASE SAVEPOINT {branch_id}")
+                await conn.commit()
+            else:
+                await conn.rollback()
+        except BaseException:
+            await conn.rollback()  # e.g. 40001 on COMMIT: the branch is rejected
+            raise
+        finally:
+            # Returned only after COMMIT/ROLLBACK, never mid-transaction.
+            await self._pools[cartridge_id].putconn(conn)
+        return round((time.perf_counter_ns() - t0) / 1_000_000.0, 3)
+
+    async def execute_direct(
+        self,
+        cartridge_id: str,
+        state_reader_fn: StateReader,
+        mutation_fn: Mutation,
+        tool_call: dict[str, Any],
+        sandbox_schema: Optional[str] = None,
+    ) -> tuple[dict[str, Any], dict[str, Any], float]:
+        """BYPASS mode: apply the mutation with no savepoint and no verification.
+
+        Against production by default, or inside a disposable sandbox copy (see
+        create_disposable_copy) when sandbox_schema is given.
         """
         t0 = time.perf_counter_ns()
-        branch_id = f"cow_{uuid.uuid4().hex[:12]}"
-        state_pre = self._row_as_dict(state_query)
-        self.conn.execute(f"SAVEPOINT cow_branch_{branch_id}")
+        pool = self._pools[cartridge_id]
+        conn = await pool.getconn(timeout=POOL_GETCONN_TIMEOUT_S)
         try:
-            self.conn.execute(mutation_sql, mutation_params)
-            state_post = self._row_as_dict(post_query or state_query)
-        except Exception:
-            self.conn.execute(f"ROLLBACK TO SAVEPOINT cow_branch_{branch_id}")
-            self.conn.execute(f"RELEASE SAVEPOINT cow_branch_{branch_id}")
+            if sandbox_schema is not None:
+                if not _SANDBOX_NAME.match(sandbox_schema):
+                    raise ValueError(f"not a sandbox schema: {sandbox_schema}")
+                # Unqualified table names (ours and the agent's) now resolve to the sandbox copy only.
+                await conn.execute(sql.SQL("SET LOCAL search_path TO {}").format(sql.Identifier(sandbox_schema)))
+                tool_call = {**tool_call, "sandbox_schema": sandbox_schema}
+            state_pre = await state_reader_fn(conn, tool_call)
+            overlays = await mutation_fn(conn, tool_call)
+            state_post = await state_reader_fn(conn, tool_call)
+            if overlays:
+                state_post.update(overlays)
+            await conn.commit()
+        except BaseException:
+            await conn.rollback()
             raise
-        self._open[branch_id] = branch_id
-        latency_ms = (time.perf_counter_ns() - t0) / 1_000_000.0
-        return branch_id, state_pre, state_post, round(latency_ms, 3)
+        finally:
+            await pool.putconn(conn)
+        return state_pre, state_post, round((time.perf_counter_ns() - t0) / 1_000_000.0, 3)
 
-    def resolve_branch(self, branch_id: str, commit: bool) -> None:
-        if branch_id not in self._open:
-            raise KeyError(f"unknown or already resolved branch: {branch_id}")
-        name = f"cow_branch_{branch_id}"
-        if commit:
-            self.conn.execute(f"RELEASE SAVEPOINT {name}")
-        else:
-            self.conn.execute(f"ROLLBACK TO SAVEPOINT {name}")
-            self.conn.execute(f"RELEASE SAVEPOINT {name}")
-        del self._open[branch_id]
+    async def rollback_all(self) -> int:
+        """Roll back every pinned branch (stage reset). Returns how many were open."""
+        branch_ids = list(self._pinned)
+        for branch_id in branch_ids:
+            try:
+                await self.resolve(branch_id, commit=False)
+            except KeyError:
+                pass  # resolved concurrently
+        return len(branch_ids)
 
-    def _row_as_dict(self, query: str) -> dict:
-        cur = self.conn.execute(query)
-        cols = [c[0] for c in cur.description]
-        row = cur.fetchone()
-        return dict(zip(cols, row)) if row else {}
+    async def create_disposable_copy(self, cartridge_id: str) -> str:
+        """Clone every public table of a cartridge DB into a fresh sandbox schema.
+
+        Used by the split comparison so the BYPASS lane can corrupt a copy while the ACTIVE
+        lane runs against production. Needs no privileges beyond owning the database.
+        """
+        schema = f"{SANDBOX_PREFIX}{uuid.uuid4().hex[:12]}"
+        async with self._pools[cartridge_id].connection(timeout=POOL_GETCONN_TIMEOUT_S) as conn:
+            await conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+            cur = await conn.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename")
+            for table in [row["tablename"] for row in await cur.fetchall()]:
+                src, dst = sql.Identifier("public", table), sql.Identifier(schema, table)
+                await conn.execute(sql.SQL("CREATE TABLE {} (LIKE {} INCLUDING ALL)").format(dst, src))
+                await conn.execute(sql.SQL("INSERT INTO {} SELECT * FROM {}").format(dst, src))
+                # LIKE copies SERIAL defaults that still point at production sequences; give the copy its own.
+                cur = await conn.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = %s AND table_name = %s AND column_default LIKE 'nextval(%%'",
+                    (schema, table),
+                )
+                for column in [row["column_name"] for row in await cur.fetchall()]:
+                    seq = sql.Identifier(schema, f"{table}_{column}_seq")
+                    await conn.execute(sql.SQL("CREATE SEQUENCE {}").format(seq))
+                    await conn.execute(
+                        sql.SQL("SELECT setval({}::regclass, COALESCE((SELECT max({}) FROM {}), 0) + 1, false)").format(
+                            sql.Literal(seq.as_string(conn)), sql.Identifier(column), dst
+                        )
+                    )
+                    await conn.execute(
+                        sql.SQL("ALTER TABLE {} ALTER COLUMN {} SET DEFAULT nextval({}::regclass)").format(
+                            dst, sql.Identifier(column), sql.Literal(seq.as_string(conn))
+                        )
+                    )
+        return schema
+
+    async def drop_disposable_copy(self, cartridge_id: str, schema: str) -> None:
+        if not _SANDBOX_NAME.match(schema):
+            raise ValueError(f"not a sandbox schema: {schema}")
+        async with self._pools[cartridge_id].connection(timeout=POOL_GETCONN_TIMEOUT_S) as conn:
+            await conn.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
+
+    async def drop_all_disposable_copies(self) -> int:
+        """Remove sandbox schemas left behind by interrupted split comparisons."""
+        dropped = 0
+        for cartridge_id, pool in self._pools.items():
+            async with pool.connection(timeout=POOL_GETCONN_TIMEOUT_S) as conn:
+                cur = await conn.execute(
+                    "SELECT nspname FROM pg_namespace WHERE nspname LIKE %s", (SANDBOX_PREFIX.replace("_", r"\_") + "%",)
+                )
+                schemas = [row["nspname"] for row in await cur.fetchall()]
+            for schema in schemas:
+                if _SANDBOX_NAME.match(schema):
+                    await self.drop_disposable_copy(cartridge_id, schema)
+                    dropped += 1
+        return dropped
+
+    @property
+    def active_branch_count(self) -> int:
+        return len(self._pinned)
+
+
+# ---------------------------------------------------------------------------
+# Cartridge state readers & mutation handlers.
+# Tables follow E3's seeder (services/cartridges/seed_databases.py); flag columns
+# (claim_submitted, allowlisted, cidr_open_world) are INT 0/1 as in that schema.
+# State keys follow Contract 2 and the keys read by the Z3 verifier (E2).
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class CartridgeToolHandler:
+    state_reader: StateReader
+    mutation: Mutation
+
+
+def _resource_id(tool_call: dict[str, Any], prefix: str, arg_key: str) -> str:
+    """Resolve an entity id from an explicit argument or a 'Prefix/id' target_resource."""
+    explicit = tool_call["arguments"].get(arg_key)
+    if explicit:
+        return str(explicit)
+    resource = tool_call["target_resource"]
+    return resource.split("/", 1)[1] if resource.startswith(f"{prefix}/") else resource
+
+
+async def _fetchone(conn: AsyncConnection, sql: str, params: tuple = ()) -> Optional[dict[str, Any]]:
+    cur = await conn.execute(sql, params)
+    return await cur.fetchone()
+
+
+# --- HEALTHCARE_FHIR --------------------------------------------------------
+
+PAYER_REQUIRED_THERAPY_WEEKS = 6
+
+
+async def read_healthcare_state(conn: AsyncConnection, tool_call: dict[str, Any]) -> dict[str, Any]:
+    patient_id = _resource_id(tool_call, "Patient", "patient_id")
+    # One round trip: the patient plus their latest prescription, if any.
+    row = await _fetchone(
+        conn,
+        "SELECT p.egfr_ml_min, p.active_meds, rx.found AS rx_found, rx.drug_name, rx.daily_dose_mg, "
+        "rx.claim_submitted, rx.conservative_therapy_weeks "
+        "FROM patients p LEFT JOIN LATERAL ("
+        "  SELECT true AS found, drug_name, daily_dose_mg, claim_submitted, conservative_therapy_weeks "
+        "  FROM prescriptions WHERE patient_id = p.patient_id ORDER BY id DESC LIMIT 1"
+        ") rx ON true WHERE p.patient_id = %s",
+        (patient_id,),
+    )
+    if row is None:
+        raise LookupError(f"unknown patient: {patient_id}")
+    has_rx = bool(row["rx_found"])
+    return {
+        "patient_egfr_ml_min": float(row["egfr_ml_min"]),
+        "active_medications": [m.strip() for m in (row["active_meds"] or "").split(",") if m.strip()],
+        "prescribed_drug": row["drug_name"] if has_rx else None,
+        "prescribed_dose_mg": int(row["daily_dose_mg"]) if has_rx else 0,
+        "claim_submitted": bool(row["claim_submitted"]) if has_rx else False,
+        "conservative_therapy_weeks": int(row["conservative_therapy_weeks"]) if has_rx else 0,
+        "payer_required_therapy_weeks": PAYER_REQUIRED_THERAPY_WEEKS,
+    }
+
+
+async def prescribe_medication_and_submit_claim(conn: AsyncConnection, tool_call: dict[str, Any]) -> None:
+    patient_id = _resource_id(tool_call, "Patient", "patient_id")
+    args = tool_call["arguments"]
+    therapy_weeks = int(args.get("conservative_therapy_weeks_documented", 0))
+
+    # Attached encounters (e.g. "Encounter/enc_108") count as documented therapy.
+    attached = [str(e).removeprefix("Encounter/") for e in args.get("attached_encounter_ids") or []]
+    if attached:
+        row = await _fetchone(
+            conn,
+            "SELECT COALESCE(SUM(duration_weeks), 0) AS weeks FROM encounters "
+            "WHERE patient_id = %s AND encounter_id = ANY(%s)",
+            (patient_id, attached),
+        )
+        therapy_weeks = max(therapy_weeks, int(row["weeks"]))
+
+    claim_submitted = float(args.get("claim_amount_usd", 0)) > 0
+    await conn.execute(
+        "INSERT INTO prescriptions (patient_id, drug_name, daily_dose_mg, claim_submitted, "
+        "conservative_therapy_weeks) VALUES (%s, %s, %s, %s, %s)",
+        (patient_id, args["drug_name"], int(args["daily_dose_mg"]), int(claim_submitted), therapy_weeks),
+    )
+
+
+# --- FINTECH_ESCROW ---------------------------------------------------------
+
+TREASURY_ACCOUNT_ID = "acct_treasury"
+
+
+async def read_fintech_state(conn: AsyncConnection, tool_call: dict[str, Any]) -> dict[str, Any]:
+    args = tool_call["arguments"]
+    account_id = args.get("account_id", TREASURY_ACCOUNT_ID)
+    vendor_id = _resource_id(tool_call, "Vendor", "vendor_id")
+    # One round trip: treasury row x vendor row.
+    row = await _fetchone(
+        conn,
+        "SELECT t.balance_usd, t.daily_spent_usd, t.daily_limit_usd, v.iban, v.allowlisted, v.sla_latency_ms "
+        "FROM treasury t, vendors v WHERE t.account_id = %s AND v.vendor_id = %s",
+        (account_id, vendor_id),
+    )
+    if row is None:
+        # Slow path only on error: say which one is missing.
+        if await _fetchone(conn, "SELECT 1 FROM treasury WHERE account_id = %s", (account_id,)) is None:
+            raise LookupError(f"unknown treasury account: {account_id}")
+        raise LookupError(f"unknown vendor: {vendor_id}")
+
+    # A payout IBAN that differs from the vendor's registered one is never allowlisted.
+    payout_iban = args.get("iban") or row["iban"]
+    return {
+        "treasury_balance_usd": float(row["balance_usd"]),
+        "daily_escrow_spent_usd": float(row["daily_spent_usd"]),
+        "daily_escrow_limit_usd": float(row["daily_limit_usd"]),
+        "vendor_id": vendor_id,
+        "payout_iban": payout_iban,
+        "vendor_latency_ms": float(row["sla_latency_ms"]),
+        "iban_allowlisted": bool(row["allowlisted"]) and payout_iban == row["iban"],
+        "transfer_amount_usd": 0.0,
+    }
+
+
+async def wire_transfer(conn: AsyncConnection, tool_call: dict[str, Any]) -> dict[str, Any]:
+    args = tool_call["arguments"]
+    amount = float(args["amount_usd"])
+    if amount <= 0:
+        raise ValueError("amount_usd must be positive")
+    vendor_id = _resource_id(tool_call, "Vendor", "vendor_id")
+    account_id = args.get("account_id", TREASURY_ACCOUNT_ID)
+    # One round trip: the transfer insert rides along as a data-modifying CTE.
+    await conn.execute(
+        "WITH sent AS (INSERT INTO transfers (vendor_id, amount_usd, status) VALUES (%s, %s, 'SENT')) "
+        "UPDATE treasury SET balance_usd = balance_usd - %s, daily_spent_usd = daily_spent_usd + %s "
+        "WHERE account_id = %s",
+        (vendor_id, amount, amount, amount, account_id),
+    )
+    # The transfer amount is not derivable from table state alone, so report it as an overlay.
+    return {"transfer_amount_usd": amount}
+
+
+# --- CLOUD_DEVOPS -----------------------------------------------------------
+
+DEFAULT_SECURITY_GROUP = "sg_prod"
+WORLD_CIDRS = {"0.0.0.0/0", "::/0"}
+
+# Statements that would end or escape the shadow branch (AGENTS.md §4.1, Least Privilege).
+_FORBIDDEN_SQL = re.compile(
+    r"^\s*("
+    r"BEGIN|START\s+TRANSACTION|COMMIT|END|ABORT|ROLLBACK|SAVEPOINT|RELEASE|PREPARE\s+TRANSACTION"
+    r"|SET(?!\s+LOCAL\b)|RESET|DISCARD|COPY|DO|CREATE\s+DATABASE|DROP\s+DATABASE|ALTER\s+SYSTEM"
+    r"|VACUUM|CHECKPOINT|LISTEN|UNLISTEN|NOTIFY"
+    r")\b",
+    re.IGNORECASE,
+)
+# In a sandbox copy, a schema-qualified name would reach past the copy into production.
+_QUALIFIED_PUBLIC = re.compile(r"\b(public|pg_temp)\s*\.", re.IGNORECASE)
+
+
+async def read_devops_state(conn: AsyncConnection, tool_call: dict[str, Any]) -> dict[str, Any]:
+    sg_id = tool_call["arguments"].get("sg_id", DEFAULT_SECURITY_GROUP)
+    # A failed statement aborts the whole Postgres transaction, so check for a dropped table
+    # (to_regclass) instead of catching UndefinedTable. Same round trip as the security group.
+    sg = await _fetchone(
+        conn,
+        "SELECT to_regclass('users') IS NOT NULL AS users_present, port, cidr_open_world "
+        "FROM security_groups WHERE sg_id = %s",
+        (sg_id,),
+    )
+    if sg is None:
+        raise LookupError(f"unknown security group: {sg_id}")
+    row_count = 0
+    if sg["users_present"]:
+        row_count = (await _fetchone(conn, "SELECT COUNT(*) AS n FROM users"))["n"]
+    return {
+        "prod_table_row_count": int(row_count),
+        "sg_id": sg_id,
+        "port_number": int(sg["port"]),
+        "cidr_open_world": bool(sg["cidr_open_world"]),
+    }
+
+
+async def run_migration(conn: AsyncConnection, tool_call: dict[str, Any]) -> None:
+    # One statement per execute(), so nothing can hide a second statement behind a ';'.
+    for statement in (s.strip() for s in tool_call["arguments"]["sql"].split(";")):
+        if not statement:
+            continue
+        if _FORBIDDEN_SQL.match(statement):
+            raise PermissionError(
+                f"'{statement.split()[0].upper()}' is not allowed inside a shadow branch"
+            )
+        if tool_call.get("sandbox_schema") and _QUALIFIED_PUBLIC.search(statement):
+            raise PermissionError("schema-qualified names are not allowed inside a sandbox copy")
+        await conn.execute(statement)
+
+
+async def update_security_group(conn: AsyncConnection, tool_call: dict[str, Any]) -> None:
+    args = tool_call["arguments"]
+    sg_id = args.get("sg_id", DEFAULT_SECURITY_GROUP)
+    cursor = await conn.execute(
+        "UPDATE security_groups SET port = %s, cidr_open_world = %s WHERE sg_id = %s",
+        (int(args["port"]), int(str(args.get("cidr", "")) in WORLD_CIDRS), sg_id),
+    )
+    if cursor.rowcount == 0:
+        raise LookupError(f"unknown security group: {sg_id}")
+
+
+CARTRIDGE_HANDLERS: dict[tuple[str, str], CartridgeToolHandler] = {
+    ("HEALTHCARE_FHIR", "prescribe_medication_and_submit_claim"): CartridgeToolHandler(
+        read_healthcare_state, prescribe_medication_and_submit_claim
+    ),
+    ("FINTECH_ESCROW", "wire_transfer"): CartridgeToolHandler(read_fintech_state, wire_transfer),
+    ("CLOUD_DEVOPS", "run_migration"): CartridgeToolHandler(read_devops_state, run_migration),
+    ("CLOUD_DEVOPS", "update_security_group"): CartridgeToolHandler(
+        read_devops_state, update_security_group
+    ),
+}

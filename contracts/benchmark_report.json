@@ -1,0 +1,94 @@
+{
+  "generated_at": "2026-10-14T08:10:46+00:00",
+  "environment": {
+    "platform": "Windows 11",
+    "python": "3.14.3",
+    "postgres": "16.4",
+    "z3": "5.1.0",
+    "z3_mode": "untimed: real prover_core verdict on a worker thread, excluded from all timings",
+    "db_roundtrip_ms": {
+      "min": 0.865,
+      "p50": 1.41,
+      "p90": 1.998,
+      "p99": 2.814,
+      "max": 3.647
+    },
+    "unit": "ms"
+  },
+  "runs": {
+    "sequential": {
+      "cycles": 500,
+      "cartridges": [
+        "HEALTHCARE_FHIR"
+      ],
+      "verdicts": {
+        "SAT": 250,
+        "UNSAT": 250
+      },
+      "phases": {
+        "fork_ms": {
+          "min": 4.188,
+          "p50": 6.223,
+          "p90": 10.14,
+          "p99": 14.159,
+          "max": 16.032
+        },
+        "resolve_ms": {
+          "min": 0.807,
+          "p50": 1.768,
+          "p90": 3.206,
+          "p99": 4.319,
+          "max": 4.873
+        },
+        "total_ms": {
+          "min": 5.166,
+          "p50": 8.09,
+          "p90": 12.9,
+          "p99": 18.312,
+          "max": 19.535
+        }
+      }
+    },
+    "concurrent": {
+      "cycles": 50,
+      "cartridges": [
+        "HEALTHCARE_FHIR"
+      ],
+      "verdicts": {
+        "SAT": 25,
+        "UNSAT": 25
+      },
+      "phases": {
+        "fork_ms": {
+          "min": 39.418,
+          "p50": 208.072,
+          "p90": 358.751,
+          "p99": 392.462,
+          "max": 392.462
+        },
+        "resolve_ms": {
+          "min": 1.556,
+          "p50": 4.391,
+          "p90": 6.594,
+          "p99": 17.201,
+          "max": 17.201
+        },
+        "total_ms": {
+          "min": 41.905,
+          "p50": 213.94,
+          "p90": 360.908,
+          "p99": 397.026,
+          "max": 397.026
+        }
+      }
+    }
+  },
+  "gate": {
+    "applies_to": "sequential.total_ms",
+    "p50_limit_ms": 3.5,
+    "p99_limit_ms": 8.0,
+    "p50_ms": 8.09,
+    "p99_ms": 18.312,
+    "passed": false
+  }
+}
