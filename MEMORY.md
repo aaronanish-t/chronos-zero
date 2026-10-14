@@ -5,13 +5,13 @@ Everything done in the red-team Merge Gate sync, from the audit to a green CI on
 | | |
 |---|---|
 | Repo | https://github.com/aaronanish-t/chronos-zero (private) |
-| `main` | **5388e04**, fast-forwarded from `merge-gate/sync`; CI green |
+| `main` | **c5412d9**, same as `merge-gate/sync`; CI green. Commit IDs are post-rewrite (section 8). |
 | Work branch | `merge-gate/sync` (pushed) |
 | Local worktree | `C:\Users\anish\Projects\chronos-zero-gate` |
 | Original checkout | `C:\Users\anish\Projects\chronos-zero` (still on `feat/e1-kernel`) |
 | Storage | PostgreSQL 16 (AGENTS.md section 4.1). The audit prompt's SQLite / `/dev/shm` / `nmcli` wording is outdated, so its checks were applied to the Postgres design. |
 
-`MEMORY.md` is listed in `.git/info/exclude`, so it stays local and is not on GitHub.
+`MEMORY.md` is committed on `main`. It was force-added past the local `.git/info/exclude` entry; tracked files ignore that exclude. Appendix A keeps the original local project overview verbatim.
 
 ---
 
@@ -19,18 +19,20 @@ Everything done in the red-team Merge Gate sync, from the audit to a green CI on
 
 1. **Merge.** `feat/e1-kernel`, `feat/e2-z3-prover`, `feat/e3-cartridges` and `feat/e4-multiverse-ui` were merged onto `main` in the `merge-gate/sync` worktree. No conflicts. 120 existing tests passed, but they mocked Z3 or the kernel.
 2. **Audit.** Read every service and reproduced each suspected bug with probe scripts before fixing it (section 2).
-3. **First fixes, pushed as WIP** (08f2172): kernel, Z3, cartridge and UI fixes (section 3).
-4. **Stage readiness** (ecdb3ee). First fast-forward of `main`.
+3. **First fixes, pushed as WIP** (f05ea4a): kernel, Z3, cartridge and UI fixes (section 3).
+4. **Stage readiness** (e7be1c3). First fast-forward of `main`.
    - Contract-parity tests and a live-stack E2E test.
    - Recorded the offline replay cache.
    - Stage launcher and Makefile targets.
    - Fixed the WebSocket dependency found while driving the UI in the browser.
-5. **Follow-ups** (2b634bd, 5388e04). Second fast-forward of `main`; all CI jobs green.
+5. **Follow-ups** (d8ebe71, 102f28c). Second fast-forward of `main`; all CI jobs green.
    - CI workflow.
    - Flaky timing tests hardened.
    - Test isolation.
    - FinTech fail-closed fix.
    - Lockfile resync.
+6. **MEMORY.md committed** (c5412d9), with the original overview as Appendix A.
+7. **Claude co-author trailers removed from all history**: three branches rewritten and force-pushed (section 8).
 
 ## 2. Audit verdicts (before fixes) — all four FAIL
 
@@ -132,7 +134,7 @@ Everything done in the red-team Merge Gate sync, from the audit to a green CI on
   - 8 threads no longer crash.
 - **Regression power:** swapping the pre-fix `nl_compiler.py` back in makes 5 of 6 live policy tests fail.
 - **Local suite (Windows):** 160 passed, plus the 2 new FinTech fail-closed tests (32/32 in that file).
-- **CI (Linux):** all three jobs green on `merge-gate/sync` and on `main` (run 38543608674).
+- **CI (Linux):** all three jobs green on `merge-gate/sync` and on `main`, including after the history rewrite (run 38546403647).
 - **UI:** `tsc` clean and `next build` passes.
 - **Driven live in the browser** (stack on offset ports):
   - Healthcare: UNSAT with 3 violations, healed in 1 turn from `replay_offline`; the inspector shows the real SMT-LIB2, counterexamples and timings.
@@ -168,9 +170,51 @@ During the pitch:
 ## 7. Gotchas found on this PC
 - An older kernel and Z3, not started by us, sometimes answer on :8000/:8001. `netstat` can't see them (likely WSL or another network namespace). Use `--offset 100`.
 - MSYS `sed -i` and Python `write_text` on Windows can flip files to CRLF. Edits were normalized to LF before committing.
-- The original `feat/*` branches are unchanged. Teammates should rebase onto the new `main`.
+- `feat/e1-kernel`, `feat/e2-z3-prover` and `feat/e4-multiverse-ui` are unchanged. `feat/e3-cartridges` was rewritten (section 8). Teammates should rebase onto the new `main`.
 
-## 8. Still open
+## 8. History rewrite: Claude co-author trailers removed (2026-10-14)
+
+Aaron asked for Claude to be removed from the GitHub contributors.
+
+**Source.** Aaron's commits never carried Claude attribution. The only credits were `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>` trailers on three E3 commits by rishipradeep-stack:
+- `4a7a983` seeder
+- `0e2badd` orchestrator
+- `040a152` tool-name fix
+
+**How.** `git filter-branch --msg-filter` deleted only the trailer lines on every branch containing those commits. All three were rewritten in one pass, so shared commits got identical new IDs. Then `git push --force-with-lease` (so a newer push by someone else would have been refused rather than overwritten).
+
+| Branch | Before | After |
+|---|---|---|
+| `main` | `fdb1612` | `c5412d9` |
+| `merge-gate/sync` | `fdb1612` | `c5412d9` |
+| `feat/e3-cartridges` | `de56490` | `fe7a670` |
+
+**Checked before pushing:**
+- File trees identical to the originals.
+- Same commit counts (43; 12 on E3) and the same authors.
+- Zero Claude trailers left.
+- E3 is still an ancestor of `main`.
+
+**Checked after:** zero Claude trailers on any remote or local branch, and CI green on the rewritten `main`. The local `main` and `feat/e3-cartridges` in `C:\Users\anish\Projects\chronos-zero` were moved onto the new history; neither had local-only work.
+
+**Old to new IDs (main):**
+
+| Before | After |
+|---|---|
+| `08f2172` | `f05ea4a` |
+| `ecdb3ee` | `e7be1c3` |
+| `2b634bd` | `d8ebe71` |
+| `5388e04` | `102f28c` |
+| `fdb1612` | `c5412d9` |
+
+Commits before `4a7a983` (and those not descending from it) kept their IDs.
+
+**Team follow-up:**
+- Anyone with the old history, especially Rishi (E3), runs `git fetch && git reset --hard origin/<branch>`, or rebases unpushed work onto the new history first.
+- GitHub caches the contributors graph, so the Claude entry can take a while to disappear.
+- Rishi should turn off co-author trailers in his coding assistant so they don't return.
+
+## 9. Still open
 - Run `make bench` on the actual stage laptop and rehearse there with Wi-Fi off.
 - Optional: emit the Contract 4 `POLICY_COMPILED` event from the kernel when a policy is compiled. Nothing emits it today; the UI ignores it.
 - Optional: CI actions on Node 20 are deprecated on GitHub runners. Warnings only; bump `actions/*` versions later.
