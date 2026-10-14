@@ -19,6 +19,7 @@ import {
   ToggleLeft,
   ToggleRight,
   ShieldAlert,
+  Layers,
 } from "lucide-react";
 import { CartridgeId, ChronosMode } from "../types/contracts";
 import { TelemetryMetrics, WSConnectionStatus } from "../hooks/useChronosWS";
@@ -82,6 +83,7 @@ interface TopTelemetryBarProps {
   onSimulate: (cartridge: CartridgeId) => void;
   onSimulateBypass: () => void;
   onReset: () => void;
+  onOpenSplitDemo?: () => void;
 }
 
 export const TopTelemetryBar: React.FC<TopTelemetryBarProps> = ({
@@ -95,6 +97,7 @@ export const TopTelemetryBar: React.FC<TopTelemetryBarProps> = ({
   onSimulate,
   onSimulateBypass,
   onReset,
+  onOpenSplitDemo,
 }) => {
   // 1-Click Cartridge Switcher configuration
   const cartridges: {
@@ -243,6 +246,17 @@ export const TopTelemetryBar: React.FC<TopTelemetryBarProps> = ({
             <RotateCcw className="w-3 h-3" />
             <span className="hidden sm:inline">Reset</span>
           </button>
+
+          {onOpenSplitDemo && (
+            <button
+              onClick={onOpenSplitDemo}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-gradient-to-r from-red-950 via-purple-950 to-emerald-950 hover:from-red-900 hover:via-purple-900 hover:to-emerald-900 border border-slate-700 text-slate-200 font-mono font-semibold text-xs transition-all shadow-sm"
+              title="Open 50/50 Split-Screen Comparison: Unprotected AI Agent vs Chronos-Zero"
+            >
+              <Layers className="w-3.5 h-3.5 text-cyan-400" />
+              <span>50/50 Split Demo</span>
+            </button>
+          )}
         </div>
       </div>
 

@@ -6,6 +6,7 @@ import { TopTelemetryBar } from "../components/TopTelemetryBar";
 import { MultiverseDAG } from "../components/MultiverseDAG";
 import { Z3ProofInspector } from "../components/Z3ProofInspector";
 import { LivePolicyStudio } from "../components/LivePolicyStudio";
+import { SplitScreenDemo } from "../components/SplitScreenDemo";
 
 export default function MissionControlPage() {
   const {
@@ -28,6 +29,7 @@ export default function MissionControlPage() {
   } = useChronosWS();
 
   const [isInspectorOpen, setIsInspectorOpen] = useState(true);
+  const [isSplitDemoOpen, setIsSplitDemoOpen] = useState(false);
 
   return (
     <main className="flex flex-col h-screen w-screen overflow-hidden bg-[#090D16]">
@@ -43,6 +45,7 @@ export default function MissionControlPage() {
         onSimulate={simulateMockTelemetry}
         onSimulateBypass={simulateBypassCorruption}
         onReset={resetDAG}
+        onOpenSplitDemo={() => setIsSplitDemoOpen(true)}
       />
 
       {/* Center Layout: ReactFlow Canvas (Panel 2) + Right Z3 Proof Drawer (Panel 3) */}
@@ -71,6 +74,12 @@ export default function MissionControlPage() {
 
       {/* Panel 4: Bottom Live Policy Studio Bar */}
       <LivePolicyStudio activeCartridge={activeCartridge} />
+
+      {/* 50/50 Comparative Multiverse Split Screen Modal */}
+      <SplitScreenDemo
+        isOpen={isSplitDemoOpen}
+        onClose={() => setIsSplitDemoOpen(false)}
+      />
     </main>
   );
 }
