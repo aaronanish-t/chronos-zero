@@ -19,7 +19,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from replay_middleware import DeterministicReplayMiddleware, ReplayMiss
 from scenarios import SCENARIOS
+from scenarios.judge_policies import match_policy, scenario_key
 from seed_databases import db_dsn
 
 KERNEL_URL = os.environ.get("CHRONOS_KERNEL_URL", "http://localhost:8000") + "/v1/kernel/execute"
@@ -29,7 +31,7 @@ CartridgeId = Literal["HEALTHCARE_FHIR", "FINTECH_ESCROW", "CLOUD_DEVOPS"]
 ChronosMode = Literal["ACTIVE", "BYPASS"]
 
 
-# shortcut: tool calls are scripted per scenario, not LLM-generated; swap in the LLM + DeterministicReplayMiddleware here.
+# shortcut: the "LLM" is the scripted scenario functions; a real model call goes in _live_tool_call, already behind replay.
 
 
 def correction_prompt(verdict: dict) -> str:
@@ -46,16 +48,34 @@ def correction_prompt(verdict: dict) -> str:
 
 class ChronosAgentRunner:
     def __init__(self, cartridge_id: CartridgeId, chronos_mode: ChronosMode, custom_prompt: Optional[str] = None,
-                 client: Optional[httpx.AsyncClient] = None):
+                 client: Optional[httpx.AsyncClient] = None, replay: Optional[DeterministicReplayMiddleware] = None):
         if cartridge_id not in SCENARIOS:
             raise ValueError(f"unknown cartridge_id: {cartridge_id}")
         self.cartridge_id = cartridge_id
         self.chronos_mode = chronos_mode
         self.scenario = SCENARIOS[cartridge_id]
-        self.prompt = custom_prompt or self.scenario.PROMPT
+        self.prompt = self.scenario.PROMPT
+        # custom_prompt is a judge's policy from the Live Policy Studio, enforced on top of the scenario.
+        self.policy = match_policy(cartridge_id, custom_prompt)
+        self.scenario_key = scenario_key(custom_prompt)
         self.trace_id = f"tr_{uuid.uuid4().hex[:12]}"
         self.client = client
+        self.replay = replay or REPLAY
         self.messages: list[dict] = [{"role": "user", "content": self.prompt}]
+        if custom_prompt:
+            self.messages.append({"role": "system", "content": f"Active custom policy: {custom_prompt}"})
+
+    async def _live_tool_call(self, turn: int) -> dict:
+        if turn == 1:
+            return self.scenario.hazard()
+        call = await self._read_safe_state()
+        if self.policy:
+            call["arguments"].update(self.policy["turn2_arguments"])
+        return call
+
+    async def agent_tool_call(self, turn: int) -> tuple[dict, str]:
+        return await self.replay.tool_call(self.cartridge_id, self.scenario_key, turn,
+                                           lambda: self._live_tool_call(turn))
 
     async def _execute(self, client: httpx.AsyncClient, tool_call: dict) -> dict:
         payload = {
@@ -82,13 +102,15 @@ class ChronosAgentRunner:
         client = self.client or httpx.AsyncClient()
         turns = []
         try:
-            hazard = self.scenario.hazard()
-            turns.append({"turn": 1, "tool_call": hazard, "verdict": await self._execute(client, hazard)})
+            hazard, source = await self.agent_tool_call(1)
+            turns.append({"turn": 1, "tool_call": hazard, "agent_source": source,
+                          "verdict": await self._execute(client, hazard)})
             first = turns[0]["verdict"]
             if self.chronos_mode == "ACTIVE" and first.get("status") == "UNSAT":
                 self.messages.append({"role": "system", "priority": "high", "content": correction_prompt(first)})
-                corrected = await self._read_safe_state()
-                turns.append({"turn": 2, "tool_call": corrected, "verdict": await self._execute(client, corrected)})
+                corrected, source = await self.agent_tool_call(2)
+                turns.append({"turn": 2, "tool_call": corrected, "agent_source": source,
+                              "verdict": await self._execute(client, corrected)})
         finally:
             if self.client is None:
                 await client.aclose()
@@ -100,6 +122,9 @@ class ChronosAgentRunner:
             "self_healed": len(turns) == 2 and turns[1]["verdict"].get("status") == "SAT",
             "messages": self.messages,
         }
+
+
+REPLAY = DeterministicReplayMiddleware()
 
 
 class RunScenarioRequest(BaseModel):
@@ -124,6 +149,8 @@ async def run_scenario(req: RunScenarioRequest) -> dict:
                                                      "kernel_detail": exc.response.text})
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"kernel unreachable: {exc!r}")
+    except ReplayMiss as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
     except psycopg.Error as exc:
         raise HTTPException(status_code=500, detail=f"cartridge DB not ready (run seed_databases.py): {exc}")
 
