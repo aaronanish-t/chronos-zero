@@ -1,6 +1,6 @@
 PY ?= python
 
-.PHONY: test test-z3 test-cow bench db-up db-down db-reset db-psql seed
+.PHONY: test test-z3 test-cow test-contracts bench db-up db-down db-reset db-psql seed \n	stage kernel z3 agent ui ui-install record-replay demo-verify
 
 # The latency benchmark has its own target (it is slower and hardware-dependent).
 test:
@@ -34,3 +34,42 @@ db-psql:
 # Rebuild all 3 cartridge databases (E3's seeder; reads CHRONOS_PG_DSN).
 seed:
 	$(PY) services/cartridges/seed_databases.py
+
+# Contract parity: JSON Schema == Pydantic == TypeScript, and live verdicts validate (AGENTS.md section 5).
+test-contracts:
+	$(PY) -m pytest tests/test_contract_parity.py -q
+
+# --- Stage -----------------------------------------------------------------------------------
+# Everything binds 127.0.0.1 and runs with OFFLINE_MODE=1 (no LLM calls, replay cache available).
+# Order on the demo laptop: make db-up && make seed && make stage
+
+# All four services in one terminal; Ctrl+C stops them.
+stage:
+	$(PY) infra/stage.py
+
+# Or one per terminal / tmux pane:
+kernel:
+	cd services/kernel-proxy && OFFLINE_MODE=1 $(PY) main.py
+
+z3:
+	cd services/z3-verifier && OFFLINE_MODE=1 $(PY) server.py
+
+agent:
+	cd services/cartridges && OFFLINE_MODE=1 $(PY) orchestrator.py
+
+ui:
+	cd services/multiverse-ui && NEXT_TELEMETRY_DISABLED=1 npm run dev
+
+# Needs network once (before the venue); afterwards the UI runs offline.
+ui-install:
+	cd services/multiverse-ui && npm ci
+
+# Re-record services/cartridges/replay_cache.sqlite after changing a scenario (needs a seeded DB).
+record-replay: seed
+	RECORD_REPLAY=1 $(PY) services/cartridges/replay_middleware.py
+
+# Airplane-mode gate (@skill:lock-offline-replay): real kernel + Z3 + agent + Postgres in-process,
+# all 3 cartridges, judge policies, BYPASS + reset, split comparison, offline replay; fails on any
+# non-loopback connection. Run with Wi-Fi off before the pitch.
+demo-verify:
+	OFFLINE_MODE=1 $(PY) -m pytest tests/test_e2e_live_stack.py tests/test_contract_parity.py -v

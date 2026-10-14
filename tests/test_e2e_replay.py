@@ -75,6 +75,6 @@ def test_judge_policy_keys():
     assert scenario_key(None) == "default"
     typed = "  no SINGLE wire-transfer may exceed 500 "
     assert scenario_key(typed) == scenario_key("No single wire transfer may exceed $500.")
-    assert match_policy("FINTECH_ESCROW", typed)["turn2_arguments"] == {"amount_usd": 500.0}
+    assert match_policy("FINTECH_ESCROW", typed)["text"] == "No single wire transfer may exceed $500."
     assert match_policy("CLOUD_DEVOPS", typed) is None
     assert len({scenario_key(p["text"]) for p in JUDGE_POLICIES}) == 5

@@ -173,7 +173,7 @@ export const TopTelemetryBar: React.FC<TopTelemetryBarProps> = ({
               <>
                 <WifiOff className="w-3.5 h-3.5 text-slate-400" />
                 <span className="text-slate-400 font-medium">
-                  WS: KERNEL :8000 OFFLINE
+                  WS: KERNEL OFFLINE
                 </span>
               </>
             )}

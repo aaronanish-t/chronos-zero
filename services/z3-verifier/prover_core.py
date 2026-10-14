@@ -8,6 +8,7 @@ Z3 tracked assertions. Detects ALL violated rules when multiple invariants fail.
 from __future__ import annotations
 
 import hashlib
+import re
 import sys
 import time
 from pathlib import Path
@@ -201,7 +202,9 @@ def dispatch_verification(
                 elif r_id == "INV_OPS_02_NO_PUBLIC_ADMIN_PORT":
                     cex = f"cidr_open_world={context.get('cidr_open_world')}, port_number={context.get('port_number')}"
                 else:
-                    cex = f"State delta rejected by {r_id}: {context}"
+                    # Compiled policy: show the bound values of the variables its formula uses.
+                    used = [k for k in context if re.search(rf"\b{re.escape(k)}\b", formal_str)]
+                    cex = ", ".join(f"{k}={context[k]}" for k in used) or f"State delta rejected by {r_id}"
                 if r_id in timed_out:
                     cex += " [solver returned unknown within the 50 ms timeout; rejected fail-closed]"
 
