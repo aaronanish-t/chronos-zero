@@ -1,57 +1,114 @@
-"""Copy-on-write shadow branches using SQLite savepoints.
-
-fork_and_simulate applies a mutation inside SAVEPOINT cow_branch_{id} and keeps it
-open so the Z3 verdict can decide: resolve_branch(commit=True) releases it,
-commit=False rolls it back. Nothing is committed to production before the verdict.
-"""
-
+# services/kernel-proxy/cow_engine.py
+import os
 import sqlite3
+import tempfile
+import threading
 import time
 import uuid
+from typing import Any, Callable
+
+# /dev/shm on Linux; CHRONOS_DB_DIR overrides; system temp dir elsewhere (e.g. Windows dev boxes).
+SHM_DIR = os.environ.get("CHRONOS_DB_DIR") or (
+    "/dev/shm" if os.path.exists("/dev/shm") else tempfile.gettempdir()
+)
 
 
-class CowEngine:
-    def __init__(self, db_path: str):
-        # isolation_level=None gives us manual transaction control for SAVEPOINT.
-        self.conn = sqlite3.connect(db_path, isolation_level=None, check_same_thread=False)
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA synchronous=NORMAL")
-        self._open: dict[str, str] = {}
+class CoWBranchEngine:
+    """
+    Per-branch isolated SQLite WAL Savepoint manager.
+    Conforms strictly to AGENTS.md Section 4.1:
+    - Separate connection opened per shadow branch.
+    - Pinned in memory until Z3 returns SAT or UNSAT.
+    - Explicitly closed once committed or rolled back.
+    """
 
-    def fork_and_simulate(self, state_query: str, mutation_sql: str, mutation_params=(), post_query: str = None):
-        """Apply a mutation inside a savepoint and return (branch_id, state_pre, state_post, latency_ms).
+    def __init__(self) -> None:
+        self._pinned_connections: dict[str, sqlite3.Connection] = {}
+        self._lock = threading.Lock()
 
-        state_query / post_query must return a single row; the result is returned as a dict.
-        The savepoint is left open until resolve_branch is called.
+    @staticmethod
+    def get_db_path(cartridge_id: str) -> str:
+        return os.path.join(SHM_DIR, f"chronos_{cartridge_id}.db")
+
+    def _open_branch_connection(self, cartridge_id: str) -> sqlite3.Connection:
+        db_path = self.get_db_path(cartridge_id)
+        conn = sqlite3.connect(
+            db_path,
+            timeout=5.0,
+            isolation_level=None,  # Autocommit mode so manual SAVEPOINT controls tx boundary
+            check_same_thread=False,
+        )
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("PRAGMA temp_store=MEMORY;")
+        return conn
+
+    def fork_and_mutate(
+        self,
+        cartridge_id: str,
+        state_reader_fn: Callable[[sqlite3.Connection, dict[str, Any]], dict[str, Any]],
+        mutation_fn: Callable[[sqlite3.Connection, dict[str, Any]], dict[str, Any]],
+        tool_args: dict[str, Any],
+    ) -> tuple[str, dict[str, Any], dict[str, Any], float]:
+        t0 = time.perf_counter_ns()
+        branch_id = f"cow_branch_{uuid.uuid4().hex[:8]}"
+        conn = self._open_branch_connection(cartridge_id)
+
+        try:
+            # 1. Read pre-mutation state snapshot
+            state_pre = state_reader_fn(conn, tool_args)
+
+            # 2. Fork isolated Copy-on-Write savepoint on this dedicated connection
+            conn.execute(f"SAVEPOINT {branch_id};")
+
+            # 3. Apply speculative tool mutation inside the savepoint
+            mutation_overlays = mutation_fn(conn, tool_args)
+
+            # 4. Read post-mutation shadow state & merge any transient mutation overlays
+            state_post_shadow = state_reader_fn(conn, tool_args)
+            if mutation_overlays:
+                state_post_shadow.update(mutation_overlays)
+
+        except Exception:
+            try:
+                conn.execute(f"ROLLBACK TO SAVEPOINT {branch_id};")
+                conn.execute(f"RELEASE SAVEPOINT {branch_id};")
+            except sqlite3.Error:
+                pass
+            conn.close()
+            raise
+
+        with self._lock:
+            self._pinned_connections[branch_id] = conn
+
+        fork_latency_ms = round((time.perf_counter_ns() - t0) / 1_000_000.0, 3)
+        return branch_id, state_pre, state_post_shadow, fork_latency_ms
+
+    def resolve(self, branch_id: str, commit: bool) -> float:
+        """
+        Commits (RELEASE SAVEPOINT) or rolls back (ROLLBACK TO SAVEPOINT)
+        and unconditionally closes the branch's dedicated connection.
         """
         t0 = time.perf_counter_ns()
-        branch_id = f"cow_{uuid.uuid4().hex[:12]}"
-        state_pre = self._row_as_dict(state_query)
-        self.conn.execute(f"SAVEPOINT cow_branch_{branch_id}")
+        with self._lock:
+            conn = self._pinned_connections.pop(branch_id, None)
+
+        if conn is None:
+            raise KeyError(f"Shadow branch '{branch_id}' not found or already resolved.")
+
         try:
-            self.conn.execute(mutation_sql, mutation_params)
-            state_post = self._row_as_dict(post_query or state_query)
-        except Exception:
-            self.conn.execute(f"ROLLBACK TO SAVEPOINT cow_branch_{branch_id}")
-            self.conn.execute(f"RELEASE SAVEPOINT cow_branch_{branch_id}")
-            raise
-        self._open[branch_id] = branch_id
-        latency_ms = (time.perf_counter_ns() - t0) / 1_000_000.0
-        return branch_id, state_pre, state_post, round(latency_ms, 3)
+            if commit:
+                conn.execute(f"RELEASE SAVEPOINT {branch_id};")
+            else:
+                conn.execute(f"ROLLBACK TO SAVEPOINT {branch_id};")
+                conn.execute(f"RELEASE SAVEPOINT {branch_id};")
+        finally:
+            conn.close()
 
-    def resolve_branch(self, branch_id: str, commit: bool) -> None:
-        if branch_id not in self._open:
-            raise KeyError(f"unknown or already resolved branch: {branch_id}")
-        name = f"cow_branch_{branch_id}"
-        if commit:
-            self.conn.execute(f"RELEASE SAVEPOINT {name}")
-        else:
-            self.conn.execute(f"ROLLBACK TO SAVEPOINT {name}")
-            self.conn.execute(f"RELEASE SAVEPOINT {name}")
-        del self._open[branch_id]
+        return round((time.perf_counter_ns() - t0) / 1_000_000.0, 3)
 
-    def _row_as_dict(self, query: str) -> dict:
-        cur = self.conn.execute(query)
-        cols = [c[0] for c in cur.description]
-        row = cur.fetchone()
-        return dict(zip(cols, row)) if row else {}
+    @property
+    def active_branch_count(self) -> int:
+        with self._lock:
+            return len(self._pinned_connections)
