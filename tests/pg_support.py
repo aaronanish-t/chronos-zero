@@ -72,6 +72,7 @@ def reset_audit() -> str:
     try:
         with psycopg.connect(AUDIT_DSN, autocommit=True, connect_timeout=2) as conn:
             conn.execute("DROP TABLE IF EXISTS audit_chain")
+            conn.execute("DROP SCHEMA IF EXISTS audit_archive CASCADE")  # chains archived by resets
     except psycopg.OperationalError as exc:
         pytest.skip(f"audit PostgreSQL unreachable at {AUDIT_DSN} (run `make db-up`): {exc}")
     return AUDIT_DSN

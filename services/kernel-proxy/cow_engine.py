@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Iterable, Optional
 
-from psycopg import AsyncConnection, IsolationLevel
+from psycopg import AsyncConnection, IsolationLevel, sql
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
@@ -20,6 +20,8 @@ DEFAULT_PG_DSN = "postgresql://chronos_kernel:chronos_kernel@127.0.0.1:5432"
 CARTRIDGE_IDS = ("HEALTHCARE_FHIR", "FINTECH_ESCROW", "CLOUD_DEVOPS")
 POOL_MAX_SIZE = 16
 POOL_GETCONN_TIMEOUT_S = 2.0
+SANDBOX_PREFIX = "bypass_"
+_SANDBOX_NAME = re.compile(r"^bypass_[0-9a-f]{12}$")
 
 # Handlers receive the full Contract 1 tool_call: {"tool_name", "target_resource", "arguments"}.
 StateReader = Callable[[AsyncConnection, dict[str, Any]], Awaitable[dict[str, Any]]]
@@ -120,13 +122,24 @@ class CoWBranchEngine:
         state_reader_fn: StateReader,
         mutation_fn: Mutation,
         tool_call: dict[str, Any],
+        sandbox_schema: Optional[str] = None,
     ) -> tuple[dict[str, Any], dict[str, Any], float]:
-        """BYPASS mode: apply the mutation straight to production. No savepoint, no verification."""
+        """BYPASS mode: apply the mutation with no savepoint and no verification.
+
+        Against production by default, or inside a disposable sandbox copy (see
+        create_disposable_copy) when sandbox_schema is given.
+        """
         t0 = time.perf_counter_ns()
         pool = self._pools[cartridge_id]
         conn = await pool.getconn(timeout=POOL_GETCONN_TIMEOUT_S)
         try:
             await _bound_transaction(conn)
+            if sandbox_schema is not None:
+                if not _SANDBOX_NAME.match(sandbox_schema):
+                    raise ValueError(f"not a sandbox schema: {sandbox_schema}")
+                # Unqualified table names (ours and the agent's) now resolve to the sandbox copy only.
+                await conn.execute(sql.SQL("SET LOCAL search_path TO {}").format(sql.Identifier(sandbox_schema)))
+                tool_call = {**tool_call, "sandbox_schema": sandbox_schema}
             state_pre = await state_reader_fn(conn, tool_call)
             overlays = await mutation_fn(conn, tool_call)
             state_post = await state_reader_fn(conn, tool_call)
@@ -139,6 +152,72 @@ class CoWBranchEngine:
         finally:
             await pool.putconn(conn)
         return state_pre, state_post, round((time.perf_counter_ns() - t0) / 1_000_000.0, 3)
+
+    async def rollback_all(self) -> int:
+        """Roll back every pinned branch (stage reset). Returns how many were open."""
+        branch_ids = list(self._pinned)
+        for branch_id in branch_ids:
+            try:
+                await self.resolve(branch_id, commit=False)
+            except KeyError:
+                pass  # resolved concurrently
+        return len(branch_ids)
+
+    async def create_disposable_copy(self, cartridge_id: str) -> str:
+        """Clone every public table of a cartridge DB into a fresh sandbox schema.
+
+        Used by the split comparison so the BYPASS lane can corrupt a copy while the ACTIVE
+        lane runs against production. Needs no privileges beyond owning the database.
+        """
+        schema = f"{SANDBOX_PREFIX}{uuid.uuid4().hex[:12]}"
+        async with self._pools[cartridge_id].connection(timeout=POOL_GETCONN_TIMEOUT_S) as conn:
+            await conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+            cur = await conn.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename")
+            for table in [row["tablename"] for row in await cur.fetchall()]:
+                src, dst = sql.Identifier("public", table), sql.Identifier(schema, table)
+                await conn.execute(sql.SQL("CREATE TABLE {} (LIKE {} INCLUDING ALL)").format(dst, src))
+                await conn.execute(sql.SQL("INSERT INTO {} SELECT * FROM {}").format(dst, src))
+                # LIKE copies SERIAL defaults that still point at production sequences; give the copy its own.
+                cur = await conn.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = %s AND table_name = %s AND column_default LIKE 'nextval(%%'",
+                    (schema, table),
+                )
+                for column in [row["column_name"] for row in await cur.fetchall()]:
+                    seq = sql.Identifier(schema, f"{table}_{column}_seq")
+                    await conn.execute(sql.SQL("CREATE SEQUENCE {}").format(seq))
+                    await conn.execute(
+                        sql.SQL("SELECT setval({}::regclass, COALESCE((SELECT max({}) FROM {}), 0) + 1, false)").format(
+                            sql.Literal(seq.as_string(conn)), sql.Identifier(column), dst
+                        )
+                    )
+                    await conn.execute(
+                        sql.SQL("ALTER TABLE {} ALTER COLUMN {} SET DEFAULT nextval({}::regclass)").format(
+                            dst, sql.Identifier(column), sql.Literal(seq.as_string(conn))
+                        )
+                    )
+        return schema
+
+    async def drop_disposable_copy(self, cartridge_id: str, schema: str) -> None:
+        if not _SANDBOX_NAME.match(schema):
+            raise ValueError(f"not a sandbox schema: {schema}")
+        async with self._pools[cartridge_id].connection(timeout=POOL_GETCONN_TIMEOUT_S) as conn:
+            await conn.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
+
+    async def drop_all_disposable_copies(self) -> int:
+        """Remove sandbox schemas left behind by interrupted split comparisons."""
+        dropped = 0
+        for cartridge_id, pool in self._pools.items():
+            async with pool.connection(timeout=POOL_GETCONN_TIMEOUT_S) as conn:
+                cur = await conn.execute(
+                    "SELECT nspname FROM pg_namespace WHERE nspname LIKE %s", (SANDBOX_PREFIX.replace("_", r"\_") + "%",)
+                )
+                schemas = [row["nspname"] for row in await cur.fetchall()]
+            for schema in schemas:
+                if _SANDBOX_NAME.match(schema):
+                    await self.drop_disposable_copy(cartridge_id, schema)
+                    dropped += 1
+        return dropped
 
     @property
     def active_branch_count(self) -> int:
@@ -295,6 +374,8 @@ _FORBIDDEN_SQL = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+# In a sandbox copy, a schema-qualified name would reach past the copy into production.
+_QUALIFIED_PUBLIC = re.compile(r"\b(public|pg_temp)\s*\.", re.IGNORECASE)
 
 
 async def read_devops_state(conn: AsyncConnection, tool_call: dict[str, Any]) -> dict[str, Any]:
@@ -327,6 +408,8 @@ async def run_migration(conn: AsyncConnection, tool_call: dict[str, Any]) -> Non
             raise PermissionError(
                 f"'{statement.split()[0].upper()}' is not allowed inside a shadow branch"
             )
+        if tool_call.get("sandbox_schema") and _QUALIFIED_PUBLIC.search(statement):
+            raise PermissionError("schema-qualified names are not allowed inside a sandbox copy")
         await conn.execute(statement)
 
 

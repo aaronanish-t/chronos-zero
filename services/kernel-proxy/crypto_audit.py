@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import hashlib
 import os
+import time
 from dataclasses import asdict, dataclass
 from typing import Any, Iterable, Optional
 
+from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
@@ -168,6 +170,33 @@ class AuditChain:
                  entry.smt2_dump, entry.prev_hash, entry.entry_hash),
             )
         return entry
+
+    async def rotate(self) -> Optional[str]:
+        """Start a fresh chain (stage reset) without destroying evidence.
+
+        The current table is moved into the audit_archive schema under a timestamped name; its
+        append-only triggers move with it. Returns the archive table name, or None if empty.
+        """
+        async with self._pool.connection(timeout=_GETCONN_TIMEOUT_S) as conn:
+            await conn.execute("SELECT pg_advisory_xact_lock(%s)", (_APPEND_LOCK_KEY,))
+            cur = await conn.execute("SELECT to_regclass('public.audit_chain') IS NOT NULL AS present")
+            if not (await cur.fetchone())["present"]:
+                return None
+            archive = f"chain_{time.time_ns()}"
+            # Index names are per schema, so rename them too or the next rotation collides.
+            await conn.execute(sql.SQL("ALTER TABLE public.audit_chain RENAME TO {}").format(sql.Identifier(archive)))
+            for suffix in ("pkey", "entry_hash_key"):
+                await conn.execute(
+                    sql.SQL("ALTER INDEX {} RENAME TO {}").format(
+                        sql.Identifier("public", f"audit_chain_{suffix}"), sql.Identifier(f"{archive}_{suffix}")
+                    )
+                )
+            await conn.execute("CREATE SCHEMA IF NOT EXISTS audit_archive")
+            await conn.execute(
+                sql.SQL("ALTER TABLE {} SET SCHEMA audit_archive").format(sql.Identifier("public", archive))
+            )
+        self._schema_ready = False
+        return f"audit_archive.{archive}"
 
     async def entries(self) -> list[AuditEntry]:
         await self._ensure_schema()
