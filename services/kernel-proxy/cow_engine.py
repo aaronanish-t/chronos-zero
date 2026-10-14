@@ -18,7 +18,10 @@ from psycopg_pool import AsyncConnectionPool
 
 DEFAULT_PG_DSN = "postgresql://chronos_kernel:chronos_kernel@127.0.0.1:5432"
 CARTRIDGE_IDS = ("HEALTHCARE_FHIR", "FINTECH_ESCROW", "CLOUD_DEVOPS")
-POOL_MAX_SIZE = 16
+# Pre-warmed so a burst of branches does not pay connection setup; 3 pools x 24 stays well
+# under the demo server's max_connections=100.
+POOL_MIN_SIZE = 8
+POOL_MAX_SIZE = 24
 POOL_GETCONN_TIMEOUT_S = 2.0
 SANDBOX_PREFIX = "bypass_"
 _SANDBOX_NAME = re.compile(r"^bypass_[0-9a-f]{12}$")
@@ -46,7 +49,7 @@ class CoWBranchEngine:
         self._pools = {
             cid: AsyncConnectionPool(
                 f"{dsn_base}/{database_name(cid)}",
-                min_size=1,
+                min_size=POOL_MIN_SIZE,
                 max_size=POOL_MAX_SIZE,
                 open=False,
                 kwargs={"row_factory": dict_row},
@@ -81,9 +84,12 @@ class CoWBranchEngine:
         try:
             # psycopg opens the REPEATABLE READ transaction on the first statement.
             state_pre = await state_reader_fn(conn, tool_call)
-            await conn.execute(f"SAVEPOINT {branch_id}")
-            overlays = await mutation_fn(conn, tool_call)
-            state_post = await state_reader_fn(conn, tool_call)
+            # Pipelined: SAVEPOINT, the mutation and the post-state read are sent without waiting
+            # on each other; only a statement whose result is fetched forces a round trip.
+            async with conn.pipeline():
+                await conn.execute(f"SAVEPOINT {branch_id}")
+                overlays = await mutation_fn(conn, tool_call)
+                state_post = await state_reader_fn(conn, tool_call)
             if overlays:
                 state_post.update(overlays)
         except BaseException:
@@ -102,6 +108,7 @@ class CoWBranchEngine:
         cartridge_id, conn = pinned
         try:
             if commit:
+                # Not pipelined: measured slower than two plain round trips (pipeline setup/sync cost).
                 await conn.execute(f"RELEASE SAVEPOINT {branch_id}")
                 await conn.commit()
             else:
