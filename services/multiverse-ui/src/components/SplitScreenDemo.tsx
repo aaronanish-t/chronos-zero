@@ -193,41 +193,41 @@ export const SplitScreenDemo: React.FC<SplitScreenDemoProps> = ({ isOpen, onClos
   const notRun = <span className="text-xs text-slate-500 font-normal">not in this run</span>;
 
   return (
-    <div className="fixed inset-0 z-50 bg-[#06090F]/95 backdrop-blur-md flex flex-col overflow-hidden text-slate-100 font-mono">
+    <div className="fixed inset-0 z-50 bg-surface-container-lowest/95 backdrop-blur-xl flex flex-col overflow-hidden text-on-surface font-mono select-none">
       {/* Top Banner & Control Bar */}
-      <header className="h-14 border-b border-[#1E293B] bg-[#090D16] px-6 flex items-center justify-between shrink-0">
+      <header className="h-14 border-b border-surface-container-high/60 bg-surface-container-low px-6 flex items-center justify-between shrink-0 shadow-lg">
         <div className="flex items-center gap-3">
-          <div className="flex items-center justify-center w-8 h-8 rounded bg-gradient-to-br from-red-500/20 via-cyan-500/20 to-emerald-500/20 border border-slate-700">
-            <Zap className="w-4 h-4 text-cyan-400" />
+          <div className="flex items-center justify-center w-8 h-8 rounded-DEFAULT bg-primary/10 border border-primary/30 text-primary">
+            <span className="material-symbols-outlined text-base">splitscreen</span>
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <h2 className="text-sm font-bold tracking-wider text-slate-100 uppercase">
+              <h2 className="font-label-md text-label-md font-bold tracking-wider text-on-surface uppercase">
                 Comparative Multiverse Split-Screen
               </h2>
-              <span className="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
+              <span className="font-label-sm text-label-sm px-2 py-0.5 rounded-DEFAULT bg-surface-container-high text-on-surface-variant border border-white/5">
                 Same tool calls, both lanes live
               </span>
               {ran.length > 0 ? (
-                <span className="hidden sm:inline-flex items-center gap-1 text-[10px] text-emerald-400 bg-emerald-950/80 px-2 py-0.5 rounded border border-emerald-600/60 font-mono font-bold">
-                  <CheckCircle2 className="w-3 h-3 text-[#10B981]" />
+                <span className="hidden sm:inline-flex items-center gap-1 font-label-sm text-label-sm text-primary bg-primary/10 px-2 py-0.5 rounded-DEFAULT border border-primary/30 font-bold">
+                  <span className="material-symbols-outlined text-xs leading-none">check_circle</span>
                   POST /v1/kernel/run-split-comparison x{ran.length} ({totalLatency.toFixed(1)}ms)
                 </span>
               ) : (
-                <span className="hidden sm:inline-flex items-center gap-1 text-[10px] text-slate-400 bg-slate-900 px-2 py-0.5 rounded border border-slate-700 font-mono">
-                  <Network className="w-3 h-3 text-cyan-400" />
+                <span className="hidden sm:inline-flex items-center gap-1 font-label-sm text-label-sm text-outline bg-surface-container px-2 py-0.5 rounded-DEFAULT border border-white/5">
+                  <span className="material-symbols-outlined text-xs leading-none">hub</span>
                   POST /v1/kernel/run-split-comparison
                 </span>
               )}
             </div>
-            <p className="text-[11px] text-slate-400">
+            <p className="font-label-sm text-label-sm text-outline">
               Left: BYPASS on a disposable copy of production. Right: Chronos ACTIVE on production.
             </p>
           </div>
         </div>
 
         <div className="flex items-center gap-3">
-          <div className="hidden md:flex items-center rounded-lg bg-[#0F172A] p-0.5 border border-[#1E293B] text-xs">
+          <div className="hidden md:flex items-center rounded-DEFAULT bg-surface-container p-0.5 border border-surface-container-high text-label-sm font-mono">
             {(
               [
                 ["ALL", "All 3 Incidents"],
@@ -240,10 +240,10 @@ export const SplitScreenDemo: React.FC<SplitScreenDemoProps> = ({ isOpen, onClos
                 key={key}
                 onClick={() => setActiveScenario(key)}
                 disabled={isPlaying}
-                className={`px-2.5 py-1 rounded transition-colors ${
+                className={`px-2.5 py-1 rounded-DEFAULT transition-colors ${
                   activeScenario === key
-                    ? "bg-cyan-950 text-cyan-300 font-semibold border border-cyan-700/60"
-                    : "text-slate-400 hover:text-slate-200"
+                    ? "bg-surface-container-highest text-primary font-semibold ring-1 ring-primary/40 shadow-sm"
+                    : "text-on-surface-variant hover:text-on-surface"
                 }`}
               >
                 {label}
@@ -254,30 +254,30 @@ export const SplitScreenDemo: React.FC<SplitScreenDemoProps> = ({ isOpen, onClos
           <button
             onClick={runComparison}
             disabled={isPlaying}
-            className="flex items-center gap-2 px-3 py-1.5 rounded bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-slate-950 font-bold text-xs transition-colors shadow-sm"
+            className="flex items-center gap-2 px-3 py-1.5 rounded-DEFAULT bg-primary hover:bg-primary-fixed disabled:opacity-50 text-on-primary font-bold text-label-sm transition-all shadow-[0_0_12px_rgba(78,222,163,0.3)]"
           >
-            <Play className="w-3.5 h-3.5 fill-current" />
+            <span className="material-symbols-outlined text-sm leading-none font-bold">play_arrow</span>
             <span>{isPlaying ? "Running Both Lanes..." : "Run Split Comparison"}</span>
           </button>
 
           <button
             onClick={resetView}
             disabled={isPlaying}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded bg-slate-900 hover:bg-slate-800 border border-[#1E293B] text-slate-300 text-xs transition-colors"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-DEFAULT bg-surface-container-high hover:bg-surface-variant text-on-surface-variant hover:text-on-surface font-label-sm transition-colors"
             title="Clear this view (does not reseed; press R on the main screen for a stage reset)"
           >
-            <RotateCcw className="w-3.5 h-3.5" />
+            <span className="material-symbols-outlined text-sm leading-none">restart_alt</span>
             <span className="hidden sm:inline">Clear</span>
           </button>
 
-          <div className="h-6 w-px bg-[#1E293B]" />
+          <div className="h-6 w-px bg-surface-container-high" />
 
           <button
             onClick={onClose}
-            className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-400 hover:text-slate-200 transition-colors"
+            className="p-1.5 rounded-DEFAULT bg-surface-container-high hover:bg-surface-variant text-on-surface-variant hover:text-on-surface transition-colors"
             title="Close Split Screen and Return to DAG"
           >
-            <X className="w-4 h-4" />
+            <span className="material-symbols-outlined text-sm leading-none">close</span>
           </button>
         </div>
       </header>
