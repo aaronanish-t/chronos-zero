@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "services" / "cartr
 import orchestrator  # noqa: E402
 import seed_databases  # noqa: E402
 
-HAZARDS = {cid: s["hazard"]() for cid, s in orchestrator.SCENARIOS.items()}
+HAZARDS = {cid: s.hazard() for cid, s in orchestrator.SCENARIOS.items()}
 
 
 def fake_kernel(request: httpx.Request) -> httpx.Response:
@@ -68,7 +68,18 @@ def test_turn2_uses_safe_state(seeded):
     assert args["HEALTHCARE_FHIR"]["drug_name"] == "Linagliptin"
     assert args["HEALTHCARE_FHIR"]["attached_encounter_ids"] == ["Encounter/enc_108"]
     assert args["FINTECH_ESCROW"] == {"vendor_id": "vnd_verified", "amount_usd": 800.0}
-    assert args["CLOUD_DEVOPS"]["sql"].startswith("ALTER TABLE users ADD COLUMN")
+    assert args["CLOUD_DEVOPS"]["sql"].startswith("ALTER TABLE users ADD COLUMN migration_v2 INT DEFAULT 0;")
+    assert "port = 443, cidr_open_world = 0" in args["CLOUD_DEVOPS"]["sql"]
+    assert "DROP" not in args["CLOUD_DEVOPS"]["sql"].upper()
+
+
+def test_turn1_hazards_hit_both_rules():
+    fin = HAZARDS["FINTECH_ESCROW"]["arguments"]
+    assert fin == {"vendor_id": "vnd_spoof", "amount_usd": 12000.0}
+    ops = HAZARDS["CLOUD_DEVOPS"]["arguments"]["sql"]
+    assert ops.startswith("DROP TABLE users;") and "port = 22, cidr_open_world = 1" in ops
+    for scenario in orchestrator.SCENARIOS.values():
+        assert len(scenario.EXPECTED_TURN1_VIOLATIONS) == 2
 
 
 def test_bypass_does_not_heal():
