@@ -56,6 +56,7 @@ export function useChronosWS() {
   const [edges, setEdges] = useState<DAGEdge[]>([]);
   const [selectedNode, setSelectedNode] = useState<TelemetryNode | null>(null);
   const [activeCartridge, setActiveCartridge] = useState<CartridgeId>("FINTECH_ESCROW");
+  const [chronosMode, setChronosMode] = useState<"ACTIVE" | "BYPASS">("ACTIVE");
   const [isSimulating, setIsSimulating] = useState(false);
   const [bypassActiveAlert, setBypassActiveAlert] = useState<string | null>(null);
 
@@ -382,6 +383,27 @@ export function useChronosWS() {
                 remediation_hint: "Route payout to verified backup vendor on treasury allowlist.",
               },
             ],
+            state_pre: {
+              escrow_id: "escrow_tx_9012",
+              daily_escrow_spent_usd: 75000.0,
+              daily_escrow_limit_usd: 100000.0,
+              remaining_daily_allowance_usd: 25000.0,
+              vendor_latency_ms: 324.5,
+              iban_allowlisted: false,
+              target_iban: "GB98_SPOOFED_UNVERIFIED",
+              escrow_status: "LOCKED",
+            },
+            state_post_shadow: {
+              escrow_id: "escrow_tx_9012",
+              daily_escrow_spent_usd: 260000.0,
+              daily_escrow_limit_usd: 100000.0,
+              remaining_daily_allowance_usd: -160000.0,
+              last_transfer_amount_usd: 185000.0,
+              vendor_latency_ms: 324.5,
+              iban_allowlisted: false,
+              target_iban: "GB98_SPOOFED_UNVERIFIED",
+              escrow_status: "DEFICIT_ROLLBACK_REQUIRED",
+            },
             timestamp: Date.now(),
           },
           {
@@ -423,6 +445,27 @@ export function useChronosWS() {
             },
             remediation_hint: "None. Self-healing completed cleanly within 1 turn.",
             violated_invariants: [],
+            state_pre: {
+              escrow_id: "escrow_tx_9012",
+              daily_escrow_spent_usd: 75000.0,
+              daily_escrow_limit_usd: 100000.0,
+              remaining_daily_allowance_usd: 25000.0,
+              vendor_latency_ms: 48.2,
+              iban_allowlisted: true,
+              target_iban: "GB12_VERIFIED_BACKUP",
+              escrow_status: "LOCKED",
+            },
+            state_post_shadow: {
+              escrow_id: "escrow_tx_9012",
+              daily_escrow_spent_usd: 100000.0,
+              daily_escrow_limit_usd: 100000.0,
+              remaining_daily_allowance_usd: 0.0,
+              last_transfer_amount_usd: 25000.0,
+              vendor_latency_ms: 48.2,
+              iban_allowlisted: true,
+              target_iban: "GB12_VERIFIED_BACKUP",
+              escrow_status: "DISBURSED_SETTLED",
+            },
             timestamp: Date.now(),
           },
         ],
@@ -467,6 +510,24 @@ export function useChronosWS() {
                 remediation_hint: "Prescribe renal-safe Acetaminophen 500mg or order nephrology clearance.",
               },
             ],
+            state_pre: {
+              patient_id: "p_449",
+              patient_status: "INPATIENT_NEPHROLOGY",
+              egfr_ml_min: 28.5,
+              chronic_kidney_disease_stage: 4,
+              medication_active: "None",
+              medication_is_nsaid: false,
+              acute_kidney_injury_risk: false,
+            },
+            state_post_shadow: {
+              patient_id: "p_449",
+              patient_status: "INPATIENT_NEPHROLOGY",
+              egfr_ml_min: 28.5,
+              chronic_kidney_disease_stage: 4,
+              medication_active: "Ibuprofen 800mg Oral Tablet",
+              medication_is_nsaid: true,
+              acute_kidney_injury_risk: true,
+            },
             timestamp: Date.now(),
           },
           {
@@ -501,6 +562,25 @@ export function useChronosWS() {
             },
             remediation_hint: "None. Self-healing verified clinical safety.",
             violated_invariants: [],
+            state_pre: {
+              patient_id: "p_449",
+              patient_status: "INPATIENT_NEPHROLOGY",
+              egfr_ml_min: 28.5,
+              chronic_kidney_disease_stage: 4,
+              medication_active: "None",
+              medication_is_nsaid: false,
+              acute_kidney_injury_risk: false,
+            },
+            state_post_shadow: {
+              patient_id: "p_449",
+              patient_status: "INPATIENT_NEPHROLOGY",
+              egfr_ml_min: 28.5,
+              chronic_kidney_disease_stage: 4,
+              medication_active: "Acetaminophen 500mg Oral Tablet",
+              medication_is_nsaid: false,
+              acute_kidney_injury_risk: false,
+              scheduled_encounter: "enc_108_physical_therapy",
+            },
             timestamp: Date.now(),
           },
         ],
@@ -543,6 +623,22 @@ export function useChronosWS() {
                 remediation_hint: "Rewrite migration using non-destructive shadow column pattern.",
               },
             ],
+            state_pre: {
+              cluster_id: "aurora_prod_primary",
+              is_production: true,
+              active_tables: ["users_v1", "accounts", "transactions"],
+              table_count: 3,
+              destructive_ddl_executed: false,
+            },
+            state_post_shadow: {
+              cluster_id: "aurora_prod_primary",
+              is_production: true,
+              active_tables: ["accounts", "transactions"],
+              table_count: 2,
+              contains_destructive_drop: true,
+              destructive_ddl_executed: true,
+              dropped_entity: "users_v1",
+            },
             timestamp: Date.now(),
           },
           {
@@ -576,6 +672,22 @@ export function useChronosWS() {
             },
             remediation_hint: "None. Zero-downtime migration committed safely.",
             violated_invariants: [],
+            state_pre: {
+              cluster_id: "aurora_prod_primary",
+              is_production: true,
+              active_tables: ["users_v1", "accounts", "transactions"],
+              table_count: 3,
+              destructive_ddl_executed: false,
+            },
+            state_post_shadow: {
+              cluster_id: "aurora_prod_primary",
+              is_production: true,
+              active_tables: ["users_v1", "accounts", "transactions"],
+              table_count: 3,
+              contains_destructive_drop: false,
+              destructive_ddl_executed: false,
+              added_column: "users_v1.v2_compat",
+            },
             timestamp: Date.now(),
           },
         ],
@@ -683,6 +795,20 @@ export function useChronosWS() {
     simulationTimersRef.current.push(t1);
   }, [activeCartridge, processTelemetryEvent, resetDAG]);
 
+  const toggleChronosMode = useCallback(() => {
+    setChronosMode((prev) => {
+      const nextMode = prev === "ACTIVE" ? "BYPASS" : "ACTIVE";
+      if (nextMode === "BYPASS") {
+        setBypassActiveAlert(
+          "WARNING: Master Kernel switched to BYPASS mode. Tool executions bypass Copy-on-Write and Z3 formal proofs, exposing production databases to unverified mutations."
+        );
+      } else {
+        setBypassActiveAlert(null);
+      }
+      return nextMode;
+    });
+  }, []);
+
   return {
     status,
     events,
@@ -693,6 +819,9 @@ export function useChronosWS() {
     metrics,
     activeCartridge,
     setActiveCartridge,
+    chronosMode,
+    setChronosMode,
+    toggleChronosMode,
     isSimulating,
     bypassActiveAlert,
     dismissBypassAlert: () => setBypassActiveAlert(null),

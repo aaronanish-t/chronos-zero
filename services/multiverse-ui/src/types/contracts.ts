@@ -107,6 +107,8 @@ export interface TelemetryNode {
   violated_invariants?: ViolatedInvariant[];
   tool_call?: ToolCall;
   remediation_hint?: string;
+  state_pre?: Record<string, unknown>;
+  state_post_shadow?: Record<string, unknown>;
   timestamp?: number;
   [key: string]: unknown;
 }

@@ -17,6 +17,8 @@ export default function MissionControlPage() {
     metrics,
     activeCartridge,
     setActiveCartridge,
+    chronosMode,
+    toggleChronosMode,
     isSimulating,
     bypassActiveAlert,
     dismissBypassAlert,
@@ -35,6 +37,8 @@ export default function MissionControlPage() {
         metrics={metrics}
         activeCartridge={activeCartridge}
         setActiveCartridge={setActiveCartridge}
+        chronosMode={chronosMode}
+        onToggleChronosMode={toggleChronosMode}
         isSimulating={isSimulating}
         onSimulate={simulateMockTelemetry}
         onSimulateBypass={simulateBypassCorruption}
