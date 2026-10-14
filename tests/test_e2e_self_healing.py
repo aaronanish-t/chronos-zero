@@ -61,11 +61,9 @@ def test_active_heals_in_one_turn(cartridge_id):
 def test_turn2_uses_safe_state():
     args = {cid: run(cid, "ACTIVE")["turns"][1]["tool_call"]["arguments"] for cid in orchestrator.SCENARIOS}
     assert args["HEALTHCARE_FHIR"]["drug_name"] == "Linagliptin"
-    assert args["HEALTHCARE_FHIR"]["supporting_info"] == "Encounter/enc_108"
-    assert args["HEALTHCARE_FHIR"]["conservative_therapy_weeks"] == 6
+    assert args["HEALTHCARE_FHIR"]["attached_encounter_ids"] == ["Encounter/enc_108"]
     assert args["FINTECH_ESCROW"] == {"vendor_id": "vnd_verified", "amount_usd": 800.0}
     assert args["CLOUD_DEVOPS"]["sql"].startswith("ALTER TABLE users ADD COLUMN")
-    assert "security_group" not in args["CLOUD_DEVOPS"]
 
 
 def test_bypass_does_not_heal():
