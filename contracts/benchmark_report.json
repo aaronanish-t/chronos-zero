@@ -1,0 +1,108 @@
+{
+  "generated_at": "2026-10-14T08:02:59+00:00",
+  "environment": {
+    "platform": "Windows 11",
+    "python": "3.14.3",
+    "postgres": "16.4",
+    "z3": "5.1.0",
+    "z3_mode": "in-process prover_core (excludes HTTP hop to the :8001 verifier)",
+    "db_roundtrip_ms": {
+      "min": 0.399,
+      "p50": 0.479,
+      "p90": 0.65,
+      "p99": 0.991,
+      "max": 1.548
+    },
+    "unit": "ms"
+  },
+  "runs": {
+    "sequential": {
+      "cycles": 500,
+      "cartridges": [
+        "HEALTHCARE_FHIR"
+      ],
+      "verdicts": {
+        "SAT": 250,
+        "UNSAT": 250
+      },
+      "phases": {
+        "fork_ms": {
+          "min": 2.955,
+          "p50": 3.938,
+          "p90": 5.589,
+          "p99": 9.976,
+          "max": 16.748
+        },
+        "z3_ms": {
+          "min": 1.206,
+          "p50": 1.463,
+          "p90": 1.768,
+          "p99": 3.859,
+          "max": 4.659
+        },
+        "resolve_ms": {
+          "min": 0.59,
+          "p50": 1.148,
+          "p90": 1.817,
+          "p99": 3.308,
+          "max": 4.073
+        },
+        "total_ms": {
+          "min": 5.015,
+          "p50": 6.616,
+          "p90": 9.212,
+          "p99": 15.483,
+          "max": 20.512
+        }
+      }
+    },
+    "concurrent": {
+      "cycles": 50,
+      "cartridges": [
+        "HEALTHCARE_FHIR"
+      ],
+      "verdicts": {
+        "SAT": 25,
+        "UNSAT": 25
+      },
+      "phases": {
+        "fork_ms": {
+          "min": 23.623,
+          "p50": 219.69,
+          "p90": 301.83,
+          "p99": 313.899,
+          "max": 313.899
+        },
+        "z3_ms": {
+          "min": 1.123,
+          "p50": 1.538,
+          "p90": 3.494,
+          "p99": 5.49,
+          "max": 5.49
+        },
+        "resolve_ms": {
+          "min": 0.918,
+          "p50": 4.426,
+          "p90": 9.352,
+          "p99": 39.358,
+          "max": 39.358
+        },
+        "total_ms": {
+          "min": 27.651,
+          "p50": 230.115,
+          "p90": 306.904,
+          "p99": 316.594,
+          "max": 316.594
+        }
+      }
+    }
+  },
+  "gate": {
+    "applies_to": "sequential.total_ms",
+    "p50_limit_ms": 3.5,
+    "p99_limit_ms": 8.0,
+    "p50_ms": 6.616,
+    "p99_ms": 15.483,
+    "passed": false
+  }
+}

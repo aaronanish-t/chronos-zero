@@ -34,12 +34,10 @@ def database_name(cartridge_id: str) -> str:
 
 async def _configure(conn: AsyncConnection) -> None:
     await conn.set_isolation_level(IsolationLevel.REPEATABLE_READ)
-
-
-async def _bound_transaction(conn: AsyncConnection) -> None:
-    # psycopg opens the REPEATABLE READ transaction on the first statement.
-    await conn.execute("SET LOCAL lock_timeout = '2s'")
-    await conn.execute("SET LOCAL statement_timeout = '2s'")
+    # Lock/statement bounds (AGENTS.md §4.1) set once per pooled connection rather than per
+    # branch: saves two round trips on every fork. Agent SQL cannot change them (SET is rejected).
+    await conn.execute("SET lock_timeout = '2s'; SET statement_timeout = '2s'")
+    await conn.commit()
 
 
 class CoWBranchEngine:
@@ -81,7 +79,7 @@ class CoWBranchEngine:
         pool = self._pools[cartridge_id]
         conn = await pool.getconn(timeout=POOL_GETCONN_TIMEOUT_S)
         try:
-            await _bound_transaction(conn)
+            # psycopg opens the REPEATABLE READ transaction on the first statement.
             state_pre = await state_reader_fn(conn, tool_call)
             await conn.execute(f"SAVEPOINT {branch_id}")
             overlays = await mutation_fn(conn, tool_call)
@@ -133,7 +131,6 @@ class CoWBranchEngine:
         pool = self._pools[cartridge_id]
         conn = await pool.getconn(timeout=POOL_GETCONN_TIMEOUT_S)
         try:
-            await _bound_transaction(conn)
             if sandbox_schema is not None:
                 if not _SANDBOX_NAME.match(sandbox_schema):
                     raise ValueError(f"not a sandbox schema: {sandbox_schema}")
@@ -258,24 +255,27 @@ PAYER_REQUIRED_THERAPY_WEEKS = 6
 
 async def read_healthcare_state(conn: AsyncConnection, tool_call: dict[str, Any]) -> dict[str, Any]:
     patient_id = _resource_id(tool_call, "Patient", "patient_id")
-    patient = await _fetchone(
-        conn, "SELECT egfr_ml_min, active_meds FROM patients WHERE patient_id = %s", (patient_id,)
-    )
-    if patient is None:
-        raise LookupError(f"unknown patient: {patient_id}")
-    rx = await _fetchone(
+    # One round trip: the patient plus their latest prescription, if any.
+    row = await _fetchone(
         conn,
-        "SELECT drug_name, daily_dose_mg, claim_submitted, conservative_therapy_weeks "
-        "FROM prescriptions WHERE patient_id = %s ORDER BY id DESC LIMIT 1",
+        "SELECT p.egfr_ml_min, p.active_meds, rx.found AS rx_found, rx.drug_name, rx.daily_dose_mg, "
+        "rx.claim_submitted, rx.conservative_therapy_weeks "
+        "FROM patients p LEFT JOIN LATERAL ("
+        "  SELECT true AS found, drug_name, daily_dose_mg, claim_submitted, conservative_therapy_weeks "
+        "  FROM prescriptions WHERE patient_id = p.patient_id ORDER BY id DESC LIMIT 1"
+        ") rx ON true WHERE p.patient_id = %s",
         (patient_id,),
     )
+    if row is None:
+        raise LookupError(f"unknown patient: {patient_id}")
+    has_rx = bool(row["rx_found"])
     return {
-        "patient_egfr_ml_min": float(patient["egfr_ml_min"]),
-        "active_medications": [m.strip() for m in (patient["active_meds"] or "").split(",") if m.strip()],
-        "prescribed_drug": rx["drug_name"] if rx else None,
-        "prescribed_dose_mg": int(rx["daily_dose_mg"]) if rx else 0,
-        "claim_submitted": bool(rx["claim_submitted"]) if rx else False,
-        "conservative_therapy_weeks": int(rx["conservative_therapy_weeks"]) if rx else 0,
+        "patient_egfr_ml_min": float(row["egfr_ml_min"]),
+        "active_medications": [m.strip() for m in (row["active_meds"] or "").split(",") if m.strip()],
+        "prescribed_drug": row["drug_name"] if has_rx else None,
+        "prescribed_dose_mg": int(row["daily_dose_mg"]) if has_rx else 0,
+        "claim_submitted": bool(row["claim_submitted"]) if has_rx else False,
+        "conservative_therapy_weeks": int(row["conservative_therapy_weeks"]) if has_rx else 0,
         "payer_required_therapy_weeks": PAYER_REQUIRED_THERAPY_WEEKS,
     }
 
@@ -312,30 +312,30 @@ TREASURY_ACCOUNT_ID = "acct_treasury"
 async def read_fintech_state(conn: AsyncConnection, tool_call: dict[str, Any]) -> dict[str, Any]:
     args = tool_call["arguments"]
     account_id = args.get("account_id", TREASURY_ACCOUNT_ID)
-    treasury = await _fetchone(
-        conn,
-        "SELECT balance_usd, daily_spent_usd, daily_limit_usd FROM treasury WHERE account_id = %s",
-        (account_id,),
-    )
-    if treasury is None:
-        raise LookupError(f"unknown treasury account: {account_id}")
     vendor_id = _resource_id(tool_call, "Vendor", "vendor_id")
-    vendor = await _fetchone(
-        conn, "SELECT iban, allowlisted, sla_latency_ms FROM vendors WHERE vendor_id = %s", (vendor_id,)
+    # One round trip: treasury row x vendor row.
+    row = await _fetchone(
+        conn,
+        "SELECT t.balance_usd, t.daily_spent_usd, t.daily_limit_usd, v.iban, v.allowlisted, v.sla_latency_ms "
+        "FROM treasury t, vendors v WHERE t.account_id = %s AND v.vendor_id = %s",
+        (account_id, vendor_id),
     )
-    if vendor is None:
+    if row is None:
+        # Slow path only on error: say which one is missing.
+        if await _fetchone(conn, "SELECT 1 FROM treasury WHERE account_id = %s", (account_id,)) is None:
+            raise LookupError(f"unknown treasury account: {account_id}")
         raise LookupError(f"unknown vendor: {vendor_id}")
 
     # A payout IBAN that differs from the vendor's registered one is never allowlisted.
-    payout_iban = args.get("iban") or vendor["iban"]
+    payout_iban = args.get("iban") or row["iban"]
     return {
-        "treasury_balance_usd": float(treasury["balance_usd"]),
-        "daily_escrow_spent_usd": float(treasury["daily_spent_usd"]),
-        "daily_escrow_limit_usd": float(treasury["daily_limit_usd"]),
+        "treasury_balance_usd": float(row["balance_usd"]),
+        "daily_escrow_spent_usd": float(row["daily_spent_usd"]),
+        "daily_escrow_limit_usd": float(row["daily_limit_usd"]),
         "vendor_id": vendor_id,
         "payout_iban": payout_iban,
-        "vendor_latency_ms": float(vendor["sla_latency_ms"]),
-        "iban_allowlisted": bool(vendor["allowlisted"]) and payout_iban == vendor["iban"],
+        "vendor_latency_ms": float(row["sla_latency_ms"]),
+        "iban_allowlisted": bool(row["allowlisted"]) and payout_iban == row["iban"],
         "transfer_amount_usd": 0.0,
     }
 
@@ -347,14 +347,12 @@ async def wire_transfer(conn: AsyncConnection, tool_call: dict[str, Any]) -> dic
         raise ValueError("amount_usd must be positive")
     vendor_id = _resource_id(tool_call, "Vendor", "vendor_id")
     account_id = args.get("account_id", TREASURY_ACCOUNT_ID)
+    # One round trip: the transfer insert rides along as a data-modifying CTE.
     await conn.execute(
-        "INSERT INTO transfers (vendor_id, amount_usd, status) VALUES (%s, %s, 'SENT')",
-        (vendor_id, amount),
-    )
-    await conn.execute(
+        "WITH sent AS (INSERT INTO transfers (vendor_id, amount_usd, status) VALUES (%s, %s, 'SENT')) "
         "UPDATE treasury SET balance_usd = balance_usd - %s, daily_spent_usd = daily_spent_usd + %s "
         "WHERE account_id = %s",
-        (amount, amount, account_id),
+        (vendor_id, amount, amount, amount, account_id),
     )
     # The transfer amount is not derivable from table state alone, so report it as an overlay.
     return {"transfer_amount_usd": amount}
@@ -381,16 +379,18 @@ _QUALIFIED_PUBLIC = re.compile(r"\b(public|pg_temp)\s*\.", re.IGNORECASE)
 async def read_devops_state(conn: AsyncConnection, tool_call: dict[str, Any]) -> dict[str, Any]:
     sg_id = tool_call["arguments"].get("sg_id", DEFAULT_SECURITY_GROUP)
     # A failed statement aborts the whole Postgres transaction, so check for a dropped table
-    # instead of catching UndefinedTable.
-    exists = await _fetchone(conn, "SELECT to_regclass('users') IS NOT NULL AS present")
-    row_count = 0
-    if exists["present"]:
-        row_count = (await _fetchone(conn, "SELECT COUNT(*) AS n FROM users"))["n"]
+    # (to_regclass) instead of catching UndefinedTable. Same round trip as the security group.
     sg = await _fetchone(
-        conn, "SELECT port, cidr_open_world FROM security_groups WHERE sg_id = %s", (sg_id,)
+        conn,
+        "SELECT to_regclass('users') IS NOT NULL AS users_present, port, cidr_open_world "
+        "FROM security_groups WHERE sg_id = %s",
+        (sg_id,),
     )
     if sg is None:
         raise LookupError(f"unknown security group: {sg_id}")
+    row_count = 0
+    if sg["users_present"]:
+        row_count = (await _fetchone(conn, "SELECT COUNT(*) AS n FROM users"))["n"]
     return {
         "prod_table_row_count": int(row_count),
         "sg_id": sg_id,

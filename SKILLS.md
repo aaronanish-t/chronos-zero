@@ -19,9 +19,9 @@ Invoke these skills explicitly by name (e.g., `Execute @skill:compile-z3-invaria
 **Objective**: Implement a sub-2ms transactional shadow branch on PostgreSQL 16 using a pool-pinned connection, one `REPEATABLE READ` transaction, and a named `SAVEPOINT`.
 
 ### Execution Pattern
-1. At startup, open one `psycopg_pool.AsyncConnectionPool` per cartridge database (`{CHRONOS_PG_DSN}/chronos_{cartridge_id.lower()}`), configured for `REPEATABLE READ` and `dict_row`.
-2. Take a dedicated connection with `await pool.getconn()`. The first statement opens the transaction; bound it with `SET LOCAL lock_timeout = '2s'` and `SET LOCAL statement_timeout = '2s'`.
-3. Snapshot `state_pre` with a fast read query.
+1. At startup, open one `psycopg_pool.AsyncConnectionPool` per cartridge database (`{CHRONOS_PG_DSN}/chronos_{cartridge_id.lower()}`), configured for `REPEATABLE READ`, `dict_row`, and `lock_timeout`/`statement_timeout` of `2s` (set once per pooled connection in `configure`, not per branch).
+2. Take a dedicated connection with `await pool.getconn()`. The first statement opens the transaction.
+3. Snapshot `state_pre` with one read query (every round trip counts toward the latency gate).
 4. Issue `SAVEPOINT {shadow_branch_id}`.
 5. Execute the parameterized SQL mutation representing `tool_call`.
 6. Snapshot `state_post_shadow` inside the uncommitted transaction.
@@ -45,6 +45,8 @@ Mutation = Callable[[AsyncConnection, dict[str, Any]], Awaitable[Optional[dict[s
 
 async def _configure(conn: AsyncConnection) -> None:
     await conn.set_isolation_level(IsolationLevel.REPEATABLE_READ)
+    await conn.execute("SET lock_timeout = '2s'; SET statement_timeout = '2s'")
+    await conn.commit()
 
 
 class CoWBranchEngine:
@@ -81,8 +83,6 @@ class CoWBranchEngine:
         conn = await pool.getconn()
         try:
             # psycopg opens the REPEATABLE READ transaction on the first statement.
-            await conn.execute("SET LOCAL lock_timeout = '2s'")
-            await conn.execute("SET LOCAL statement_timeout = '2s'")
             state_pre = await state_reader_fn(conn, tool_call)
             await conn.execute(f"SAVEPOINT {branch_id}")
             overlays = await mutation_fn(conn, tool_call)
