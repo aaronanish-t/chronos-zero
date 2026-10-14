@@ -1,154 +1,154 @@
 # services/kernel-proxy/cow_engine.py
+"""Copy-on-Write shadow branches on PostgreSQL 16 (AGENTS.md §4.1, @skill:scaffold-cow-savepoint).
+
+Each branch takes a dedicated pooled connection, runs one REPEATABLE READ transaction with a
+named SAVEPOINT, and stays pinned in self._pinned until resolve(): SAT -> RELEASE + COMMIT,
+otherwise ROLLBACK. The connection returns to the pool only after COMMIT/ROLLBACK.
+"""
 import os
 import re
-import sqlite3
-import tempfile
-import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any, Awaitable, Callable, Iterable, Optional
 
-# /dev/shm on Linux; CHRONOS_DB_DIR overrides; system temp dir elsewhere (e.g. Windows dev boxes).
-SHM_DIR = os.environ.get("CHRONOS_DB_DIR") or (
-    "/dev/shm" if os.path.exists("/dev/shm") else tempfile.gettempdir()
-)
+from psycopg import AsyncConnection, IsolationLevel
+from psycopg.rows import dict_row
+from psycopg_pool import AsyncConnectionPool
+
+DEFAULT_PG_DSN = "postgresql://chronos_kernel:chronos_kernel@127.0.0.1:5432"
+CARTRIDGE_IDS = ("HEALTHCARE_FHIR", "FINTECH_ESCROW", "CLOUD_DEVOPS")
+POOL_MAX_SIZE = 16
+POOL_GETCONN_TIMEOUT_S = 2.0
 
 # Handlers receive the full Contract 1 tool_call: {"tool_name", "target_resource", "arguments"}.
-StateReader = Callable[[sqlite3.Connection, dict[str, Any]], dict[str, Any]]
-Mutation = Callable[[sqlite3.Connection, dict[str, Any]], Optional[dict[str, Any]]]
+StateReader = Callable[[AsyncConnection, dict[str, Any]], Awaitable[dict[str, Any]]]
+Mutation = Callable[[AsyncConnection, dict[str, Any]], Awaitable[Optional[dict[str, Any]]]]
+
+
+def database_name(cartridge_id: str) -> str:
+    return f"chronos_{cartridge_id.lower()}"
+
+
+async def _configure(conn: AsyncConnection) -> None:
+    await conn.set_isolation_level(IsolationLevel.REPEATABLE_READ)
+
+
+async def _bound_transaction(conn: AsyncConnection) -> None:
+    # psycopg opens the REPEATABLE READ transaction on the first statement.
+    await conn.execute("SET LOCAL lock_timeout = '2s'")
+    await conn.execute("SET LOCAL statement_timeout = '2s'")
 
 
 class CoWBranchEngine:
-    """
-    Per-branch isolated SQLite WAL Savepoint manager.
-    Conforms strictly to AGENTS.md Section 4.1:
-    - Separate connection opened per shadow branch.
-    - Pinned in memory until Z3 returns SAT or UNSAT.
-    - Explicitly closed once committed or rolled back.
-    """
+    def __init__(self, dsn_base: Optional[str] = None, cartridge_ids: Iterable[str] = CARTRIDGE_IDS) -> None:
+        dsn_base = (dsn_base or os.environ.get("CHRONOS_PG_DSN") or DEFAULT_PG_DSN).rstrip("/")
+        self._pools = {
+            cid: AsyncConnectionPool(
+                f"{dsn_base}/{database_name(cid)}",
+                min_size=1,
+                max_size=POOL_MAX_SIZE,
+                open=False,
+                kwargs={"row_factory": dict_row},
+                configure=_configure,
+            )
+            for cid in cartridge_ids
+        }
+        self._pinned: dict[str, tuple[str, AsyncConnection]] = {}
 
-    def __init__(self) -> None:
-        self._pinned: dict[str, sqlite3.Connection] = {}
-        self._lock = threading.Lock()
+    async def open(self) -> None:
+        # wait=False: the kernel starts even if Postgres is still booting; requests then fail closed.
+        for pool in self._pools.values():
+            await pool.open(wait=False)
 
-    @staticmethod
-    def get_db_path(cartridge_id: str) -> str:
-        return os.path.join(SHM_DIR, f"chronos_{cartridge_id}.db")
+    async def close(self) -> None:
+        for branch_id in list(self._pinned):
+            await self.resolve(branch_id, commit=False)
+        for pool in self._pools.values():
+            await pool.close()
 
-    def _open_branch_connection(self, cartridge_id: str) -> sqlite3.Connection:
-        db_path = self.get_db_path(cartridge_id)
-        conn = sqlite3.connect(
-            db_path,
-            timeout=5.0,
-            isolation_level=None,  # Autocommit mode so manual SAVEPOINT controls tx boundary
-            check_same_thread=False,
-        )
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-        conn.execute("PRAGMA temp_store=MEMORY;")
-        return conn
-
-    def fork_and_mutate(
+    async def fork_and_mutate(
         self,
         cartridge_id: str,
         state_reader_fn: StateReader,
         mutation_fn: Mutation,
-        tool_args: dict[str, Any],
+        tool_call: dict[str, Any],
     ) -> tuple[str, dict[str, Any], dict[str, Any], float]:
         t0 = time.perf_counter_ns()
         branch_id = f"cow_branch_{uuid.uuid4().hex[:8]}"
-        conn = self._open_branch_connection(cartridge_id)
-
+        pool = self._pools[cartridge_id]
+        conn = await pool.getconn(timeout=POOL_GETCONN_TIMEOUT_S)
         try:
-            # 1. Read pre-mutation state snapshot
-            state_pre = state_reader_fn(conn, tool_args)
-
-            # 2. Fork isolated Copy-on-Write savepoint on this dedicated connection
-            conn.execute(f"SAVEPOINT {branch_id};")
-
-            # 3. Apply speculative tool mutation inside the savepoint
-            mutation_overlays = mutation_fn(conn, tool_args)
-
-            # 4. Read post-mutation shadow state & merge any transient mutation overlays
-            state_post_shadow = state_reader_fn(conn, tool_args)
-            if mutation_overlays:
-                state_post_shadow.update(mutation_overlays)
-
-        except Exception:
-            try:
-                conn.execute(f"ROLLBACK TO SAVEPOINT {branch_id};")
-                conn.execute(f"RELEASE SAVEPOINT {branch_id};")
-            except sqlite3.Error:
-                pass
-            conn.close()
+            await _bound_transaction(conn)
+            state_pre = await state_reader_fn(conn, tool_call)
+            await conn.execute(f"SAVEPOINT {branch_id}")
+            overlays = await mutation_fn(conn, tool_call)
+            state_post = await state_reader_fn(conn, tool_call)
+            if overlays:
+                state_post.update(overlays)
+        except BaseException:
+            await conn.rollback()
+            await pool.putconn(conn)
             raise
 
-        with self._lock:
-            self._pinned[branch_id] = conn
+        self._pinned[branch_id] = (cartridge_id, conn)
+        return branch_id, state_pre, state_post, round((time.perf_counter_ns() - t0) / 1_000_000.0, 3)
 
-        fork_latency_ms = round((time.perf_counter_ns() - t0) / 1_000_000.0, 3)
-        return branch_id, state_pre, state_post_shadow, fork_latency_ms
-
-    def resolve(self, branch_id: str, commit: bool) -> float:
-        """
-        Commits (RELEASE SAVEPOINT) or rolls back (ROLLBACK TO SAVEPOINT)
-        and unconditionally closes the branch's dedicated connection.
-        """
+    async def resolve(self, branch_id: str, commit: bool) -> float:
         t0 = time.perf_counter_ns()
-        with self._lock:
-            conn = self._pinned.pop(branch_id, None)
-
-        if conn is None:
+        pinned = self._pinned.pop(branch_id, None)
+        if pinned is None:
             raise KeyError(f"Shadow branch '{branch_id}' not found or already resolved.")
-
+        cartridge_id, conn = pinned
         try:
             if commit:
-                conn.execute(f"RELEASE SAVEPOINT {branch_id};")
+                await conn.execute(f"RELEASE SAVEPOINT {branch_id}")
+                await conn.commit()
             else:
-                conn.execute(f"ROLLBACK TO SAVEPOINT {branch_id};")
-                conn.execute(f"RELEASE SAVEPOINT {branch_id};")
+                await conn.rollback()
+        except BaseException:
+            await conn.rollback()  # e.g. 40001 on COMMIT: the branch is rejected
+            raise
         finally:
-            conn.close()
-
+            # Returned only after COMMIT/ROLLBACK, never mid-transaction.
+            await self._pools[cartridge_id].putconn(conn)
         return round((time.perf_counter_ns() - t0) / 1_000_000.0, 3)
 
-    def execute_direct(
+    async def execute_direct(
         self,
         cartridge_id: str,
         state_reader_fn: StateReader,
         mutation_fn: Mutation,
-        tool_args: dict[str, Any],
+        tool_call: dict[str, Any],
     ) -> tuple[dict[str, Any], dict[str, Any], float]:
         """BYPASS mode: apply the mutation straight to production. No savepoint, no verification."""
         t0 = time.perf_counter_ns()
-        conn = self._open_branch_connection(cartridge_id)
+        pool = self._pools[cartridge_id]
+        conn = await pool.getconn(timeout=POOL_GETCONN_TIMEOUT_S)
         try:
-            state_pre = state_reader_fn(conn, tool_args)
-            conn.execute("BEGIN IMMEDIATE;")
-            try:
-                mutation_overlays = mutation_fn(conn, tool_args)
-                state_post = state_reader_fn(conn, tool_args)
-                if mutation_overlays:
-                    state_post.update(mutation_overlays)
-                conn.execute("COMMIT;")
-            except Exception:
-                conn.execute("ROLLBACK;")
-                raise
+            await _bound_transaction(conn)
+            state_pre = await state_reader_fn(conn, tool_call)
+            overlays = await mutation_fn(conn, tool_call)
+            state_post = await state_reader_fn(conn, tool_call)
+            if overlays:
+                state_post.update(overlays)
+            await conn.commit()
+        except BaseException:
+            await conn.rollback()
+            raise
         finally:
-            conn.close()
+            await pool.putconn(conn)
         return state_pre, state_post, round((time.perf_counter_ns() - t0) / 1_000_000.0, 3)
 
     @property
     def active_branch_count(self) -> int:
-        with self._lock:
-            return len(self._pinned)
+        return len(self._pinned)
 
 
 # ---------------------------------------------------------------------------
 # Cartridge state readers & mutation handlers.
-# Table layouts follow services/cartridges/seed_databases.py (E3).
+# Tables follow E3's seeder (services/cartridges/seed_databases.py); flag columns
+# (claim_submitted, allowlisted, cidr_open_world) are INT 0/1 as in that schema.
 # State keys follow Contract 2 and the keys read by the Z3 verifier (E2).
 # ---------------------------------------------------------------------------
 
@@ -167,23 +167,29 @@ def _resource_id(tool_call: dict[str, Any], prefix: str, arg_key: str) -> str:
     return resource.split("/", 1)[1] if resource.startswith(f"{prefix}/") else resource
 
 
+async def _fetchone(conn: AsyncConnection, sql: str, params: tuple = ()) -> Optional[dict[str, Any]]:
+    cur = await conn.execute(sql, params)
+    return await cur.fetchone()
+
+
 # --- HEALTHCARE_FHIR --------------------------------------------------------
 
 PAYER_REQUIRED_THERAPY_WEEKS = 6
 
 
-def read_healthcare_state(conn: sqlite3.Connection, tool_call: dict[str, Any]) -> dict[str, Any]:
+async def read_healthcare_state(conn: AsyncConnection, tool_call: dict[str, Any]) -> dict[str, Any]:
     patient_id = _resource_id(tool_call, "Patient", "patient_id")
-    patient = conn.execute(
-        "SELECT egfr_ml_min, active_meds FROM patients WHERE patient_id = ?", (patient_id,)
-    ).fetchone()
+    patient = await _fetchone(
+        conn, "SELECT egfr_ml_min, active_meds FROM patients WHERE patient_id = %s", (patient_id,)
+    )
     if patient is None:
         raise LookupError(f"unknown patient: {patient_id}")
-    rx = conn.execute(
+    rx = await _fetchone(
+        conn,
         "SELECT drug_name, daily_dose_mg, claim_submitted, conservative_therapy_weeks "
-        "FROM prescriptions WHERE patient_id = ? ORDER BY id DESC LIMIT 1",
+        "FROM prescriptions WHERE patient_id = %s ORDER BY id DESC LIMIT 1",
         (patient_id,),
-    ).fetchone()
+    )
     return {
         "patient_egfr_ml_min": float(patient["egfr_ml_min"]),
         "active_medications": [m.strip() for m in (patient["active_meds"] or "").split(",") if m.strip()],
@@ -195,7 +201,7 @@ def read_healthcare_state(conn: sqlite3.Connection, tool_call: dict[str, Any]) -
     }
 
 
-def prescribe_medication_and_submit_claim(conn: sqlite3.Connection, tool_call: dict[str, Any]) -> None:
+async def prescribe_medication_and_submit_claim(conn: AsyncConnection, tool_call: dict[str, Any]) -> None:
     patient_id = _resource_id(tool_call, "Patient", "patient_id")
     args = tool_call["arguments"]
     therapy_weeks = int(args.get("conservative_therapy_weeks_documented", 0))
@@ -203,18 +209,18 @@ def prescribe_medication_and_submit_claim(conn: sqlite3.Connection, tool_call: d
     # Attached encounters (e.g. "Encounter/enc_108") count as documented therapy.
     attached = [str(e).removeprefix("Encounter/") for e in args.get("attached_encounter_ids") or []]
     if attached:
-        placeholders = ",".join("?" * len(attached))
-        row = conn.execute(
-            "SELECT COALESCE(SUM(duration_weeks), 0) FROM encounters "
-            f"WHERE patient_id = ? AND encounter_id IN ({placeholders})",
-            (patient_id, *attached),
-        ).fetchone()
-        therapy_weeks = max(therapy_weeks, int(row[0]))
+        row = await _fetchone(
+            conn,
+            "SELECT COALESCE(SUM(duration_weeks), 0) AS weeks FROM encounters "
+            "WHERE patient_id = %s AND encounter_id = ANY(%s)",
+            (patient_id, attached),
+        )
+        therapy_weeks = max(therapy_weeks, int(row["weeks"]))
 
     claim_submitted = float(args.get("claim_amount_usd", 0)) > 0
-    conn.execute(
+    await conn.execute(
         "INSERT INTO prescriptions (patient_id, drug_name, daily_dose_mg, claim_submitted, "
-        "conservative_therapy_weeks) VALUES (?, ?, ?, ?, ?)",
+        "conservative_therapy_weeks) VALUES (%s, %s, %s, %s, %s)",
         (patient_id, args["drug_name"], int(args["daily_dose_mg"]), int(claim_submitted), therapy_weeks),
     )
 
@@ -224,19 +230,20 @@ def prescribe_medication_and_submit_claim(conn: sqlite3.Connection, tool_call: d
 TREASURY_ACCOUNT_ID = "acct_treasury"
 
 
-def read_fintech_state(conn: sqlite3.Connection, tool_call: dict[str, Any]) -> dict[str, Any]:
+async def read_fintech_state(conn: AsyncConnection, tool_call: dict[str, Any]) -> dict[str, Any]:
     args = tool_call["arguments"]
     account_id = args.get("account_id", TREASURY_ACCOUNT_ID)
-    treasury = conn.execute(
-        "SELECT balance_usd, daily_spent_usd, daily_limit_usd FROM treasury WHERE account_id = ?",
+    treasury = await _fetchone(
+        conn,
+        "SELECT balance_usd, daily_spent_usd, daily_limit_usd FROM treasury WHERE account_id = %s",
         (account_id,),
-    ).fetchone()
+    )
     if treasury is None:
         raise LookupError(f"unknown treasury account: {account_id}")
     vendor_id = _resource_id(tool_call, "Vendor", "vendor_id")
-    vendor = conn.execute(
-        "SELECT iban, allowlisted, sla_latency_ms FROM vendors WHERE vendor_id = ?", (vendor_id,)
-    ).fetchone()
+    vendor = await _fetchone(
+        conn, "SELECT iban, allowlisted, sla_latency_ms FROM vendors WHERE vendor_id = %s", (vendor_id,)
+    )
     if vendor is None:
         raise LookupError(f"unknown vendor: {vendor_id}")
 
@@ -254,20 +261,20 @@ def read_fintech_state(conn: sqlite3.Connection, tool_call: dict[str, Any]) -> d
     }
 
 
-def wire_transfer(conn: sqlite3.Connection, tool_call: dict[str, Any]) -> dict[str, Any]:
+async def wire_transfer(conn: AsyncConnection, tool_call: dict[str, Any]) -> dict[str, Any]:
     args = tool_call["arguments"]
     amount = float(args["amount_usd"])
     if amount <= 0:
         raise ValueError("amount_usd must be positive")
     vendor_id = _resource_id(tool_call, "Vendor", "vendor_id")
     account_id = args.get("account_id", TREASURY_ACCOUNT_ID)
-    conn.execute(
-        "INSERT INTO transfers (vendor_id, amount_usd, status) VALUES (?, ?, 'SENT')",
+    await conn.execute(
+        "INSERT INTO transfers (vendor_id, amount_usd, status) VALUES (%s, %s, 'SENT')",
         (vendor_id, amount),
     )
-    conn.execute(
-        "UPDATE treasury SET balance_usd = balance_usd - ?, daily_spent_usd = daily_spent_usd + ? "
-        "WHERE account_id = ?",
+    await conn.execute(
+        "UPDATE treasury SET balance_usd = balance_usd - %s, daily_spent_usd = daily_spent_usd + %s "
+        "WHERE account_id = %s",
         (amount, amount, account_id),
     )
     # The transfer amount is not derivable from table state alone, so report it as an overlay.
@@ -279,24 +286,28 @@ def wire_transfer(conn: sqlite3.Connection, tool_call: dict[str, Any]) -> dict[s
 DEFAULT_SECURITY_GROUP = "sg_prod"
 WORLD_CIDRS = {"0.0.0.0/0", "::/0"}
 
-# Statements that would end or escape the shadow savepoint (and so commit to production unverified).
+# Statements that would end or escape the shadow branch (AGENTS.md §4.1, Least Privilege).
 _FORBIDDEN_SQL = re.compile(
-    r"^\s*(BEGIN|COMMIT|END|ROLLBACK|SAVEPOINT|RELEASE|ATTACH|DETACH|VACUUM|PRAGMA)\b", re.IGNORECASE
+    r"^\s*("
+    r"BEGIN|START\s+TRANSACTION|COMMIT|END|ABORT|ROLLBACK|SAVEPOINT|RELEASE|PREPARE\s+TRANSACTION"
+    r"|SET(?!\s+LOCAL\b)|RESET|DISCARD|COPY|DO|CREATE\s+DATABASE|DROP\s+DATABASE|ALTER\s+SYSTEM"
+    r"|VACUUM|CHECKPOINT|LISTEN|UNLISTEN|NOTIFY"
+    r")\b",
+    re.IGNORECASE,
 )
-_DROP_CASCADE = re.compile(r"\s+CASCADE\s*$", re.IGNORECASE)
 
 
-def read_devops_state(conn: sqlite3.Connection, tool_call: dict[str, Any]) -> dict[str, Any]:
+async def read_devops_state(conn: AsyncConnection, tool_call: dict[str, Any]) -> dict[str, Any]:
     sg_id = tool_call["arguments"].get("sg_id", DEFAULT_SECURITY_GROUP)
-    try:
-        row_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-    except sqlite3.OperationalError as exc:
-        if "no such table" not in str(exc):
-            raise
-        row_count = 0  # table was dropped
-    sg = conn.execute(
-        "SELECT port, cidr_open_world FROM security_groups WHERE sg_id = ?", (sg_id,)
-    ).fetchone()
+    # A failed statement aborts the whole Postgres transaction, so check for a dropped table
+    # instead of catching UndefinedTable.
+    exists = await _fetchone(conn, "SELECT to_regclass('users') IS NOT NULL AS present")
+    row_count = 0
+    if exists["present"]:
+        row_count = (await _fetchone(conn, "SELECT COUNT(*) AS n FROM users"))["n"]
+    sg = await _fetchone(
+        conn, "SELECT port, cidr_open_world FROM security_groups WHERE sg_id = %s", (sg_id,)
+    )
     if sg is None:
         raise LookupError(f"unknown security group: {sg_id}")
     return {
@@ -307,8 +318,8 @@ def read_devops_state(conn: sqlite3.Connection, tool_call: dict[str, Any]) -> di
     }
 
 
-def run_migration(conn: sqlite3.Connection, tool_call: dict[str, Any]) -> None:
-    # conn.executescript() is not usable here: it COMMITs first, which would release the savepoint.
+async def run_migration(conn: AsyncConnection, tool_call: dict[str, Any]) -> None:
+    # One statement per execute(), so nothing can hide a second statement behind a ';'.
     for statement in (s.strip() for s in tool_call["arguments"]["sql"].split(";")):
         if not statement:
             continue
@@ -316,17 +327,14 @@ def run_migration(conn: sqlite3.Connection, tool_call: dict[str, Any]) -> None:
             raise PermissionError(
                 f"'{statement.split()[0].upper()}' is not allowed inside a shadow branch"
             )
-        # The mock emulates production Postgres; SQLite has no DROP TABLE ... CASCADE.
-        if statement.upper().startswith("DROP TABLE"):
-            statement = _DROP_CASCADE.sub("", statement)
-        conn.execute(statement)
+        await conn.execute(statement)
 
 
-def update_security_group(conn: sqlite3.Connection, tool_call: dict[str, Any]) -> None:
+async def update_security_group(conn: AsyncConnection, tool_call: dict[str, Any]) -> None:
     args = tool_call["arguments"]
     sg_id = args.get("sg_id", DEFAULT_SECURITY_GROUP)
-    cursor = conn.execute(
-        "UPDATE security_groups SET port = ?, cidr_open_world = ? WHERE sg_id = ?",
+    cursor = await conn.execute(
+        "UPDATE security_groups SET port = %s, cidr_open_world = %s WHERE sg_id = %s",
         (int(args["port"]), int(str(args.get("cidr", "")) in WORLD_CIDRS), sg_id),
     )
     if cursor.rowcount == 0:

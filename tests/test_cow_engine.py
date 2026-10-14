@@ -1,86 +1,99 @@
-import sqlite3
-
 import pytest
 
-import cow_engine
 from cow_engine import CoWBranchEngine
+from pg_support import pg_query, reset_databases, run
 
 CARTRIDGE = "FINTECH_ESCROW"
 
 
 @pytest.fixture
-def engine(tmp_path, monkeypatch):
-    monkeypatch.setattr(cow_engine, "SHM_DIR", str(tmp_path))
-    eng = CoWBranchEngine()
-    conn = sqlite3.connect(eng.get_db_path(CARTRIDGE))
-    conn.execute("CREATE TABLE accounts (id INTEGER PRIMARY KEY, balance INTEGER)")
-    conn.execute("INSERT INTO accounts VALUES (1, 5000)")
-    conn.commit()
-    conn.close()
-    return eng
+def dsn():
+    return reset_databases()
 
 
-def read_balance(conn, _args):
-    return {"balance": conn.execute("SELECT balance FROM accounts WHERE id = 1").fetchone()[0]}
+async def read_balance(conn, _tool_call):
+    cur = await conn.execute("SELECT balance FROM cow_test_accounts WHERE id = 1")
+    return {"balance": (await cur.fetchone())["balance"]}
 
 
-def debit(conn, args):
-    conn.execute("UPDATE accounts SET balance = balance - ? WHERE id = 1", (args["amount"],))
+async def debit(conn, tool_call):
+    await conn.execute(
+        "UPDATE cow_test_accounts SET balance = balance - %s WHERE id = 1", (tool_call["amount"],)
+    )
     return {}
 
 
-def committed_balance(eng):
-    conn = sqlite3.connect(eng.get_db_path(CARTRIDGE))
-    try:
-        return conn.execute("SELECT balance FROM accounts WHERE id = 1").fetchone()[0]
-    finally:
-        conn.close()
+def committed_balance():
+    return pg_query(CARTRIDGE, "SELECT balance FROM cow_test_accounts WHERE id = 1")[0][0]
 
 
-def test_shadow_mutation_visible_then_rolled_back(engine):
-    bid, pre, post, _ = engine.fork_and_mutate(CARTRIDGE, read_balance, debit, {"amount": 4000})
-    assert pre["balance"] == 5000
-    assert post["balance"] == 1000
-    engine.resolve(bid, commit=False)
-    assert committed_balance(engine) == 5000
-    assert engine.active_branch_count == 0
+def with_engine(dsn, scenario):
+    """Run an async scenario against a freshly opened engine."""
+    async def main():
+        engine = CoWBranchEngine(dsn, [CARTRIDGE])
+        await engine.open()
+        try:
+            return await scenario(engine)
+        finally:
+            await engine.close()
+    return run(main())
 
 
-def test_commit_persists_mutation(engine):
-    bid, _, _, _ = engine.fork_and_mutate(CARTRIDGE, read_balance, debit, {"amount": 400})
-    engine.resolve(bid, commit=True)
-    assert committed_balance(engine) == 4600
+def test_shadow_mutation_visible_then_rolled_back(dsn):
+    async def scenario(engine):
+        bid, pre, post, _ = await engine.fork_and_mutate(CARTRIDGE, read_balance, debit, {"amount": 4000})
+        assert (pre["balance"], post["balance"]) == (5000, 1000)
+        await engine.resolve(bid, commit=False)
+        assert engine.active_branch_count == 0
+    with_engine(dsn, scenario)
+    assert committed_balance() == 5000
 
 
-def test_uncommitted_branch_invisible_to_other_connections(engine):
-    bid, _, _, _ = engine.fork_and_mutate(CARTRIDGE, read_balance, debit, {"amount": 4000})
-    assert committed_balance(engine) == 5000
-    engine.resolve(bid, commit=False)
+def test_commit_persists_mutation(dsn):
+    async def scenario(engine):
+        bid, _, _, _ = await engine.fork_and_mutate(CARTRIDGE, read_balance, debit, {"amount": 400})
+        await engine.resolve(bid, commit=True)
+    with_engine(dsn, scenario)
+    assert committed_balance() == 4600
 
 
-def test_mutation_overlay_merged_into_post_state(engine):
-    def overlay(conn, args):
-        debit(conn, args)
+def test_uncommitted_branch_invisible_to_other_connections(dsn):
+    async def scenario(engine):
+        bid, _, _, _ = await engine.fork_and_mutate(CARTRIDGE, read_balance, debit, {"amount": 4000})
+        assert committed_balance() == 5000
+        await engine.resolve(bid, commit=False)
+    with_engine(dsn, scenario)
+
+
+def test_mutation_overlay_merged_into_post_state(dsn):
+    async def overlay(conn, tool_call):
+        await debit(conn, tool_call)
         return {"iban_allowlisted": False}
 
-    bid, _, post, _ = engine.fork_and_mutate(CARTRIDGE, read_balance, overlay, {"amount": 1})
-    assert post == {"balance": 4999, "iban_allowlisted": False}
-    engine.resolve(bid, commit=False)
+    async def scenario(engine):
+        bid, _, post, _ = await engine.fork_and_mutate(CARTRIDGE, read_balance, overlay, {"amount": 1})
+        assert post == {"balance": 4999, "iban_allowlisted": False}
+        await engine.resolve(bid, commit=False)
+    with_engine(dsn, scenario)
 
 
-def test_mutation_failure_rolls_back_and_unpins(engine):
-    def boom(conn, args):
-        debit(conn, args)
+def test_mutation_failure_rolls_back_and_unpins(dsn):
+    async def boom(conn, tool_call):
+        await debit(conn, tool_call)
         raise RuntimeError("tool failed")
 
-    with pytest.raises(RuntimeError):
-        engine.fork_and_mutate(CARTRIDGE, read_balance, boom, {"amount": 4000})
-    assert engine.active_branch_count == 0
-    assert committed_balance(engine) == 5000
+    async def scenario(engine):
+        with pytest.raises(RuntimeError):
+            await engine.fork_and_mutate(CARTRIDGE, read_balance, boom, {"amount": 4000})
+        assert engine.active_branch_count == 0
+    with_engine(dsn, scenario)
+    assert committed_balance() == 5000
 
 
-def test_double_resolve_raises(engine):
-    bid, _, _, _ = engine.fork_and_mutate(CARTRIDGE, read_balance, debit, {"amount": 1})
-    engine.resolve(bid, commit=False)
-    with pytest.raises(KeyError):
-        engine.resolve(bid, commit=True)
+def test_double_resolve_raises(dsn):
+    async def scenario(engine):
+        bid, _, _, _ = await engine.fork_and_mutate(CARTRIDGE, read_balance, debit, {"amount": 1})
+        await engine.resolve(bid, commit=False)
+        with pytest.raises(KeyError):
+            await engine.resolve(bid, commit=True)
+    with_engine(dsn, scenario)

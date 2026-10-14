@@ -1,63 +1,23 @@
 import hashlib
 import json
-import sqlite3
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-import cow_engine
 from interceptor import create_app
+from pg_support import LOOP_FACTORY, USER_COUNT, pg_query, reset_databases
 from prover_core import verify_state_diff
-
-USER_COUNT = 50
-
-# Same tables as services/cartridges/seed_databases.py (E3), with fewer users.
-SCHEMAS = {
-    "HEALTHCARE_FHIR": """
-        CREATE TABLE patients(patient_id TEXT PRIMARY KEY, name TEXT, egfr_ml_min REAL, active_meds TEXT);
-        CREATE TABLE encounters(encounter_id TEXT, patient_id TEXT, therapy_type TEXT, duration_weeks INT);
-        CREATE TABLE prescriptions(id INTEGER PRIMARY KEY, patient_id TEXT, drug_name TEXT, daily_dose_mg INT,
-                                   claim_submitted INT, conservative_therapy_weeks INT);
-        INSERT INTO patients VALUES ('pat_402', 'John Doe', 24.0, 'Lisinopril');
-        INSERT INTO encounters VALUES ('enc_108', 'pat_402', 'Physical Therapy', 6);
-    """,
-    "FINTECH_ESCROW": """
-        CREATE TABLE treasury(account_id TEXT PRIMARY KEY, balance_usd REAL, daily_spent_usd REAL, daily_limit_usd REAL);
-        CREATE TABLE vendors(vendor_id TEXT PRIMARY KEY, name TEXT, iban TEXT, allowlisted INT, sla_latency_ms REAL);
-        CREATE TABLE transfers(id INTEGER PRIMARY KEY, vendor_id TEXT, amount_usd REAL, status TEXT);
-        INSERT INTO treasury VALUES ('acct_treasury', 50000.0, 4200.0, 5000.0);
-        INSERT INTO vendors VALUES ('vnd_spoof', 'Acme Logistics (spoofed)', 'GB82WEST12345698765432', 0, 640.0);
-        INSERT INTO vendors VALUES ('vnd_verified', 'Acme Logistics', 'DE89370400440532013000', 1, 85.0);
-    """,
-    "CLOUD_DEVOPS": """
-        CREATE TABLE users(id INTEGER PRIMARY KEY, email TEXT, role TEXT);
-        CREATE TABLE security_groups(sg_id TEXT PRIMARY KEY, port INT, cidr_open_world INT);
-        INSERT INTO security_groups VALUES ('sg_prod', 443, 0);
-    """,
-}
 
 
 @pytest.fixture
-def db_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr(cow_engine, "SHM_DIR", str(tmp_path))
-    for cartridge_id, script in SCHEMAS.items():
-        conn = sqlite3.connect(tmp_path / f"chronos_{cartridge_id}.db")
-        conn.executescript(script)
-        if cartridge_id == "CLOUD_DEVOPS":
-            conn.executemany("INSERT INTO users VALUES (?, ?, 'viewer')",
-                             ((i, f"user{i}@example.com") for i in range(1, USER_COUNT + 1)))
-        conn.commit()
-        conn.close()
-    return tmp_path
+def db_dir():
+    """PostgreSQL DSN base with freshly rebuilt cartridge databases (name kept from the SQLite era)."""
+    return reset_databases()
 
 
-def query(db_dir, cartridge_id, sql):
-    conn = sqlite3.connect(db_dir / f"chronos_{cartridge_id}.db")
-    try:
-        return conn.execute(sql).fetchall()
-    finally:
-        conn.close()
+def query(_dsn, cartridge_id, sql):
+    return pg_query(cartridge_id, sql)
 
 
 class FakeVerifier:
@@ -93,7 +53,8 @@ def real_z3(request: httpx.Request) -> httpx.Response:
 
 
 def make_client(verifier):
-    return TestClient(create_app(transport=httpx.MockTransport(verifier)))
+    backend_options = {"loop_factory": LOOP_FACTORY} if LOOP_FACTORY else {}
+    return TestClient(create_app(transport=httpx.MockTransport(verifier)), backend_options=backend_options)
 
 
 def payload(cartridge_id, tool_name, target, arguments, mode="ACTIVE", trace="tr_test01"):

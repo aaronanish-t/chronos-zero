@@ -10,17 +10,18 @@ than a valid SAT/UNSAT verdict for this branch, the shadow branch is rolled back
 from __future__ import annotations
 
 import os
-import sqlite3
 import sys
 import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Awaitable, Optional
 
 import httpx
+import psycopg
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from starlette.concurrency import run_in_threadpool
+from psycopg import errors as pg_errors
+from psycopg_pool import PoolTimeout
 
 REPO_ROOT = str(Path(__file__).resolve().parents[2])
 if REPO_ROOT not in sys.path:
@@ -35,7 +36,7 @@ from contracts.schemas import (  # noqa: E402
 )
 from cow_engine import CARTRIDGE_HANDLERS, CoWBranchEngine  # noqa: E402
 
-Z3_VERIFY_URL = os.environ.get("CHRONOS_Z3_URL", "http://localhost:8001/v1/z3/verify")
+Z3_VERIFY_URL = os.environ.get("CHRONOS_Z3_URL", "http://127.0.0.1:8001/v1/z3/verify")
 Z3_TIMEOUT_S = 2.0
 ROOT_NODE_ID = "node_root"
 MONEY_ARG_KEYS = ("claim_amount_usd", "amount_usd")
@@ -91,13 +92,24 @@ def _corruption_metrics(state_pre: dict[str, Any], state_post: dict[str, Any], a
     }
 
 
-async def _run_engine(fn: Callable[..., Any], *args: Any) -> Any:
-    """Run a blocking SQLite operation off the event loop and map tool errors to HTTP errors."""
+# Concurrency conflicts: another branch holds or already changed the rows (AGENTS.md §4.1).
+_CONFLICT_ERRORS = (pg_errors.SerializationFailure, pg_errors.LockNotAvailable, pg_errors.QueryCanceled)
+
+
+async def _run_engine(call: Awaitable[Any]) -> Any:
+    """Await an engine operation and map tool/database errors to HTTP errors.
+
+    The engine has already rolled the transaction back when any of these surface.
+    """
     try:
-        return await run_in_threadpool(fn, *args)
+        return await call
+    except PoolTimeout as exc:
+        raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
     except (LookupError, ValueError, TypeError, PermissionError) as exc:
         raise HTTPException(status_code=400, detail=f"tool call rejected: {exc}") from exc
-    except sqlite3.Error as exc:
+    except _CONFLICT_ERRORS as exc:
+        raise HTTPException(status_code=409, detail=f"conflicting branch, rolled back: {exc}") from exc
+    except psycopg.Error as exc:
         raise HTTPException(status_code=422, detail=f"mutation failed: {exc}") from exc
 
 
@@ -113,17 +125,22 @@ async def _verify(client: httpx.AsyncClient, url: str, diff: StateDiffRequest) -
 def create_app(
     z3_verify_url: str = Z3_VERIFY_URL,
     transport: Optional[httpx.AsyncBaseTransport] = None,
+    pg_dsn: Optional[str] = None,
 ) -> FastAPI:
-    engine = CoWBranchEngine()
+    engine = CoWBranchEngine(pg_dsn)
     hub = TelemetryHub()
     last_committed_node: dict[str, str] = {}  # agent_id -> id of the agent's last production change
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # One persistent client for the life of the service.
-        async with httpx.AsyncClient(timeout=Z3_TIMEOUT_S, transport=transport) as client:
-            app.state.z3_client = client
-            yield
+        # One persistent HTTP client and one Postgres pool per cartridge for the life of the service.
+        await engine.open()
+        try:
+            async with httpx.AsyncClient(timeout=Z3_TIMEOUT_S, transport=transport) as client:
+                app.state.z3_client = client
+                yield
+        finally:
+            await engine.close()
 
     app = FastAPI(title="CHRONOS-ZERO Kernel Proxy", version="0.2.0", lifespan=lifespan)
     app.state.engine = engine
@@ -151,7 +168,7 @@ def create_app(
 
         if req.chronos_mode == "BYPASS":
             state_pre, state_post, _ = await _run_engine(
-                engine.execute_direct, req.cartridge_id, handler.state_reader, handler.mutation, tool_call
+                engine.execute_direct(req.cartridge_id, handler.state_reader, handler.mutation, tool_call)
             )
             total_ms = _elapsed_ms(t0)
             node = _node(
@@ -181,7 +198,7 @@ def create_app(
 
         # ACTIVE: fork -> verify -> resolve.
         branch_id, state_pre, state_post, fork_ms = await _run_engine(
-            engine.fork_and_mutate, req.cartridge_id, handler.state_reader, handler.mutation, tool_call
+            engine.fork_and_mutate(req.cartridge_id, handler.state_reader, handler.mutation, tool_call)
         )
         diff = StateDiffRequest(
             trace_id=req.trace_id,
@@ -199,8 +216,9 @@ def create_app(
         except Exception as exc:  # fail closed: any verifier problem means no commit
             verify_error = exc
         finally:
-            # Always resolve, so the pinned connection (and its write lock) is released.
-            await run_in_threadpool(engine.resolve, branch_id, verdict is not None and verdict.status == "SAT")
+            # Always resolve, so the pinned connection (and its row locks) is released.
+            # A failed COMMIT (e.g. 40001) is rolled back by the engine and surfaces as 409.
+            await _run_engine(engine.resolve(branch_id, verdict is not None and verdict.status == "SAT"))
 
         if verdict is None:
             raise HTTPException(
