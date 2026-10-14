@@ -2,8 +2,9 @@
 
 ## 1. System Identity & Core Mission
 You are operating inside **CHRONOS-ZERO**: *The Speculative Execution & Formal Verification Kernel for High-Stakes Autonomous AI*.
-* **Core Mechanism**: Intercept agent tool calls (`< 1.5ms`) -> Fork in-memory Copy-on-Write (CoW) shadow state (`< 1.5ms`) -> Verify post-mutation state delta via Microsoft Z3 SMT Theorem Prover (`< 2.5ms`) -> Commit (`SAT`) or Rewind + Self-Heal (`UNSAT`).
-* **Golden Rule**: Never substitute deterministic Z3 mathematical proofs or real SQLite `SAVEPOINT` rollbacks with probabilistic LLM prompts or simulated delays. Every verification must produce a real SMT-LIB2 dump, a tracked `UnsatCore`, and a SHA-256 receipt.
+* **Core Mechanism**: Intercept agent tool calls (`< 1.5ms`) -> Fork a PostgreSQL transaction-scoped Copy-on-Write (CoW) shadow branch (`SAVEPOINT`, `< 1.5ms`) -> Verify post-mutation state delta via Microsoft Z3 SMT Theorem Prover (`< 2.5ms`) -> Commit (`SAT`) or Rewind + Self-Heal (`UNSAT`).
+* **Golden Rule**: Never substitute deterministic Z3 mathematical proofs or real PostgreSQL `SAVEPOINT`/transaction rollbacks with probabilistic LLM prompts or simulated delays. Every verification must produce a real SMT-LIB2 dump, a tracked `UnsatCore`, and a SHA-256 receipt.
+* **Storage Engine**: PostgreSQL 16 replaces SQLite for all cartridge state. Where the original plan (`hackathon`) mentions SQLite, `/dev/shm`, `PRAGMA` or WAL, this file takes precedence.
 
 ---
 
@@ -12,15 +13,15 @@ This repository is developed in parallel by 4 engineers across 4 isolated Git br
 
 | Branch / Worktree | Agent Persona | Owned Paths (READ/WRITE) | Read-Only Paths |
 | :--- | :--- | :--- | :--- |
-| `feat/e1-kernel` | `@kernel-agent` | `services/kernel-proxy/`, `contracts/`, `Makefile`, `docker-compose.yml` | `services/z3-verifier/`, `services/cartridges/`, `services/multiverse-ui/` |
+| `feat/e1-kernel` | `@kernel-agent` | `services/kernel-proxy/`, `contracts/`, `Makefile`, `docker-compose.yml`, `infra/postgres/`, `.env.example` | `services/z3-verifier/`, `services/cartridges/`, `services/multiverse-ui/` |
 | `feat/e2-z3-prover` | `@z3-formal-agent` | `services/z3-verifier/`, `tests/test_z3_*` | `contracts/`, `services/kernel-proxy/` |
-| `feat/e3-cartridges` | `@cartridge-agent` | `services/cartridges/`, `tests/test_e2e_*` | `contracts/`, `services/kernel-proxy/`, `services/z3-verifier/` |
+| `feat/e3-cartridges` | `@cartridge-agent` | `services/cartridges/`, `tests/test_e2e_*` | `contracts/`, `services/kernel-proxy/`, `services/z3-verifier/`, `infra/postgres/` |
 | `feat/e4-multiverse-ui` | `@multiverse-ui-agent` | `services/multiverse-ui/` | `contracts/` |
 
 ---
 
 ## 3. Immutable Data Contracts (Strict Schema Lock)
-All inter-service communication MUST validate against Pydantic v2 (Python) and Zod/TypeScript interfaces derived from `/contracts/`. **Field renaming is strictly forbidden.**
+All inter-service communication MUST validate against Pydantic v2 (Python) and Zod/TypeScript interfaces derived from `/contracts/`. **Field renaming is strictly forbidden.** The move to PostgreSQL does not change any contract.
 
 1. **Contract 1 (`POST http://localhost:8000/v1/kernel/execute`)**:
    * Required root keys: `trace_id` (`str`), `timestamp_ns` (`int`), `cartridge_id` (`Literal["HEALTHCARE_FHIR", "FINTECH_ESCROW", "CLOUD_DEVOPS"]`), `chronos_mode` (`Literal["ACTIVE", "BYPASS"]`), `agent_id` (`str`), `tool_call` (`dict` with `tool_name`, `target_resource`, `arguments`).
@@ -36,8 +37,15 @@ All inter-service communication MUST validate against Pydantic v2 (Python) and Z
 ## 4. Non-Negotiable Engineering Invariants
 
 ### 4.1 Kernel & CoW Engine (`services/kernel-proxy/`)
-* **Storage Path**: All SQLite databases MUST reside on Linux RAM disk (`/dev/shm/chronos_{cartridge_id}.db`) with `PRAGMA journal_mode=WAL;` and `PRAGMA synchronous=NORMAL;`.
-* **Connection Pinning**: SQLite `SAVEPOINT` transactions are connection-scoped. A shadow branch MUST pin its dedicated SQLite connection object in an in-memory dictionary (`active_branches[shadow_branch_id] = conn`) from `SAVEPOINT cow_branch_X` until `RELEASE` or `ROLLBACK TO` completes.
+* **Storage**: All cartridge state lives in PostgreSQL 16, one database per cartridge: `chronos_healthcare_fhir`, `chronos_fintech_escrow`, `chronos_cloud_devops` (i.e. `chronos_{cartridge_id.lower()}`). Every service reads the server address from `CHRONOS_PG_DSN` (default `postgresql://chronos_kernel:chronos_kernel@127.0.0.1:5432`) and appends the database name. Use `127.0.0.1`, not `localhost`, to avoid IPv6 fallback delays.
+* **RAM-Backed Demo Server**: `docker compose up` runs Postgres with its data directory on `tmpfs` and `fsync=off`, `synchronous_commit=off`, `full_page_writes=off`. Durability is deliberately off because `make seed` rebuilds all state. Never reuse these settings or this DSN against a real database.
+* **Driver**: `psycopg` 3 (async) with one `psycopg_pool.AsyncConnectionPool` per cartridge database. No synchronous database calls inside async FastAPI routes.
+* **Connection Pinning**: PostgreSQL transactions and `SAVEPOINT`s are connection-scoped. A shadow branch MUST take a dedicated connection from the pool, run inside one `REPEATABLE READ` transaction, issue `SAVEPOINT cow_branch_X`, and pin that connection in `self._pinned[shadow_branch_id]` until resolved:
+  * `SAT` → `RELEASE SAVEPOINT cow_branch_X` then `COMMIT`.
+  * `UNSAT`, verifier error, or timeout → `ROLLBACK` (the transaction contains only this branch).
+  * The connection goes back to the pool **only after** `COMMIT`/`ROLLBACK` completes. Never return a connection to the pool mid-transaction.
+* **Bounded Locking**: Each branch sets `SET LOCAL lock_timeout = '2s'` and `SET LOCAL statement_timeout = '2s'` so a stuck branch cannot stall others. A serialization failure (`SQLSTATE 40001`) or lock timeout on commit is treated as a rejected branch: roll back and report it, never retry silently.
+* **Least Privilege**: Services connect as role `chronos_kernel` (owner of the cartridge databases, not a superuser). Agent-supplied SQL (e.g. `CLOUD_DEVOPS` migrations) MUST be rejected if it contains transaction or session control (`BEGIN`, `START TRANSACTION`, `COMMIT`, `END`, `ROLLBACK`, `SAVEPOINT`, `RELEASE`, `PREPARE TRANSACTION`, `SET`/`RESET` other than `SET LOCAL`, `DISCARD`), or server-level statements (`COPY`, `DO`, `CREATE/DROP DATABASE`, `ALTER SYSTEM`, `VACUUM`, `LISTEN`/`NOTIFY`). These would escape or end the shadow branch.
 * **Timing Precision**: Use `time.perf_counter_ns()` divided by `1_000_000.0` for all latency telemetry. Never use `time.time()` for sub-millisecond measurement.
 
 ### 4.2 Z3 Formal Verifier (`services/z3-verifier/`)
@@ -46,8 +54,9 @@ All inter-service communication MUST validate against Pydantic v2 (Python) and Z
 * **Explicit Type Casting**: Cast all incoming JSON floats to `z3.RealVal(val)` and ints to `z3.IntVal(val)` to avoid Python float-precision solver mismatches.
 
 ### 4.3 Domain Cartridges & Orchestrator (`services/cartridges/`)
+* **Seeding**: `seed_databases.py` connects via `CHRONOS_PG_DSN`, rebuilds each cartridge database's tables, and bulk-loads data with `COPY` (not row-by-row `INSERT`) so all three reset in `< 0.5s`. Mock "production" SQL is real PostgreSQL, so demo statements such as `DROP TABLE users CASCADE` run natively.
 * **1-Turn Self-Healing**: When `chronos_mode == "ACTIVE"` and the kernel returns `status == "UNSAT"`, the agent orchestrator MUST automatically append the `violated_invariants` and `remediation_hint` into the agent message history and trigger a corrective tool call without human intervention.
-* **Offline Determinism**: Wrap all external LLM calls (Opus 5.5 / GPT 6 Astra) with `DeterministicReplayMiddleware` backed by `/services/cartridges/replay_cache.sqlite`. If `OFFLINE_MODE=1` or network latency exceeds `1500ms`, serve the cached tool-call trajectory immediately.
+* **Offline Determinism**: Wrap all external LLM calls (Opus 5.5 / GPT 6 Astra) with `DeterministicReplayMiddleware` backed by `/services/cartridges/replay_cache.sqlite`. If `OFFLINE_MODE=1` or network latency exceeds `1500ms`, serve the cached tool-call trajectory immediately. (The replay cache is a local file of recorded LLM responses, not cartridge state, so it stays SQLite.)
 
 ### 4.4 Multiverse UI (`services/multiverse-ui/`)
 * **Zero Polling**: All DAG updates and telemetry counters must update reactively via the single WebSocket stream (`ws://localhost:8000/ws/telemetry`).
@@ -62,7 +71,10 @@ All inter-service communication MUST validate against Pydantic v2 (Python) and Z
 Run these commands from the repository root before opening any PR or calling a Merge Gate:
 
 ```bash
-# 1. Seed all 3 in-memory /dev/shm cartridge databases (< 0.5s)
+# 0. Start the RAM-backed PostgreSQL 16 server (Docker) and wait until healthy
+make db-up
+
+# 1. Seed all 3 cartridge databases (< 0.5s)
 make seed
 
 # 2. Validate JSON Schema parity across Python Pydantic & TypeScript interfaces
@@ -78,9 +90,11 @@ pytest tests/test_cow_latency.py -s
 pytest tests/test_e2e_self_healing.py -v
 ```
 
+Tests that need PostgreSQL may `pytest.skip` only when `CHRONOS_PG_DSN` is unreachable. Merge Gate runs MUST have the database up, so nothing is skipped.
+
 ---
 
 ## 6. Dual-Model Prompting Protocol (Opus 5.5 + GPT 6 Astra)
 * **Builder Step (Claude Opus 5.5)**: Use for implementation. Always include `@AGENTS.md` and the relevant skill from `@SKILLS.md` in context.
 * **Auditor Step (GPT 6 Astra)**: Before committing on any branch, run:
-  > *"Act as `@redteam-auditor`. Inspect `git diff` against `@AGENTS.md` Section 3 (Contracts) and Section 4 (Invariants). Flag any blocking I/O, untracked Z3 assertions, unpinned SQLite savepoints, or schema key mismatches."*
+  > *"Act as `@redteam-auditor`. Inspect `git diff` against `@AGENTS.md` Section 3 (Contracts) and Section 4 (Invariants). Flag any blocking I/O, untracked Z3 assertions, PostgreSQL connections returned to the pool mid-transaction, unbounded lock waits, agent SQL that can escape the shadow branch, or schema key mismatches."*
