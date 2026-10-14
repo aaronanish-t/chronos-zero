@@ -1,6 +1,6 @@
 # CHRONOS-ZERO
 
-Speculative-execution and Z3 verification kernel for autonomous AI agents. Tool calls are applied to a shadow savepoint, checked against domain invariants, then committed or rolled back. See [AGENTS.md](AGENTS.md) and [hackathon](hackathon) for the full plan.
+Speculative-execution and Z3 verification kernel for autonomous AI agents. Tool calls are applied to a shadow savepoint, checked against domain invariants, then committed or rolled back. See [hackathon](hackathon) for the full plan and [ENGINEERS.md](ENGINEERS.md) for the per-engineer breakdown.
 
 ## Status
 
