@@ -1,0 +1,224 @@
+/**
+ * CHRONOS-ZERO Immutable Data Contracts
+ * Mirroring JSON Schemas from /contracts/
+ *
+ * Contract 1: Interceptor Request Payload (POST /v1/kernel/execute)
+ * Contract 2: Kernel-to-Z3 State Diff Payload (POST /v1/z3/verify)
+ * Contract 3: Z3 Prover Verdict Payload
+ * Contract 4: WebSocket UI Telemetry Event (ws://localhost:8000/ws/telemetry)
+ */
+
+// ==========================================
+// Shared Primitive Enums & Literals
+// ==========================================
+
+export type CartridgeId = "HEALTHCARE_FHIR" | "FINTECH_ESCROW" | "CLOUD_DEVOPS";
+
+export type ChronosMode = "ACTIVE" | "BYPASS";
+
+export type Z3Status = "SAT" | "UNSAT" | "TIMEOUT" | "ERROR";
+
+export type NodeZ3Verdict = "SAT" | "UNSAT" | "TIMEOUT" | "ERROR" | "NONE";
+
+export type BranchType =
+  | "ROOT"
+  | "SHADOW_REJECTED"
+  | "COMMITTED_SAFE"
+  | "BYPASS_CORRUPTED";
+
+export type TelemetryEventType =
+  | "BRANCH_EVALUATED"
+  | "BYPASS_CORRUPTED"
+  | "POLICY_COMPILED"
+  | "DEMO_RESET";
+
+// ==========================================
+// Contract 1: Interceptor Request Payload
+// ==========================================
+
+export interface ToolCall {
+  tool_name: string;
+  target_resource: string;
+  arguments: Record<string, unknown>;
+}
+
+export interface InterceptPayload {
+  trace_id: string; // pattern: ^tr_[A-Za-z0-9]+$
+  timestamp_ns: number;
+  cartridge_id: CartridgeId;
+  chronos_mode: ChronosMode;
+  agent_id: string;
+  tool_call: ToolCall;
+}
+
+// ==========================================
+// Contract 2: Kernel-to-Z3 State Diff Payload
+// ==========================================
+
+export interface StateDiffPayload {
+  trace_id: string;
+  shadow_branch_id: string;
+  cartridge_id: CartridgeId;
+  cow_fork_latency_ms: number;
+  state_pre: Record<string, unknown>;
+  state_post_shadow: Record<string, unknown>;
+}
+
+// ==========================================
+// Contract 3: Z3 Prover Verdict Payload
+// ==========================================
+
+export interface ViolatedInvariant {
+  rule_id: string; // pattern: ^INV_[A-Z]+_[0-9]{2}_[A-Z0-9_]+$
+  formal_assertion: string;
+  counterexample: string;
+  remediation_hint: string;
+}
+
+export interface Z3VerdictPayload {
+  trace_id: string;
+  shadow_branch_id: string;
+  status: Z3Status;
+  proof_latency_ms: number;
+  violated_invariants: ViolatedInvariant[];
+  smt2_dump: string;
+  sha256_proof_hash: string; // pattern: ^[a-f0-9]{64}$
+}
+
+// ==========================================
+// Contract 4: WebSocket UI Telemetry Event
+// ==========================================
+
+export interface TelemetryNode {
+  id: string;
+  parent_id: string | null;
+  branch_type: BranchType;
+  action_label: string;
+  total_latency_ms: number;
+  z3_verdict: NodeZ3Verdict;
+  violated_rules: string[];
+  financial_loss_prevented_usd: number;
+  clinical_hazard_prevented: boolean;
+  // Extended fields for inspection / proof drawer UI
+  cow_fork_latency_ms?: number;
+  proof_latency_ms?: number;
+  smt2_dump?: string;
+  sha256_proof_hash?: string;
+  violated_invariants?: ViolatedInvariant[];
+  tool_call?: ToolCall;
+  remediation_hint?: string;
+  state_pre?: Record<string, unknown>;
+  state_post_shadow?: Record<string, unknown>;
+  timestamp?: number;
+  [key: string]: unknown;
+}
+
+export interface TelemetryEvent {
+  event_type: TelemetryEventType;
+  trace_id: string;
+  cartridge_id: CartridgeId;
+  node: TelemetryNode;
+}
+
+// ==========================================
+// Kernel Tamper-Evident Audit Log (GET /v1/kernel/audit-log)
+// ==========================================
+
+export interface AuditEntry {
+  index: number;
+  trace_id: string;
+  shadow_branch_id: string;
+  status: string;
+  timestamp_ns: number;
+  smt2_dump: string;
+  prev_hash: string;
+  entry_hash: string;
+}
+
+export interface AuditLogResponse {
+  length: number;
+  genesis_hash: string;
+  head_hash: string;
+  merkle_root: string;
+  verified: boolean;
+  entries: AuditEntry[];
+}
+
+// ==========================================
+// Kernel Split Comparison (POST /v1/kernel/run-split-comparison)
+// ==========================================
+
+export interface SplitComparisonRequest {
+  trace_id: string;
+  timestamp_ns: number;
+  cartridge_id: CartridgeId;
+  agent_id: string;
+  steps: ToolCall[];
+}
+
+export interface SplitBypassStep {
+  step: number;
+  committed?: boolean;
+  status_code?: number;
+  error?: string;
+  corruption?: {
+    capital_exposed_usd: number;
+    rows_lost: number;
+    changed_fields?: Record<string, { pre: unknown; post: unknown }>;
+  };
+  [key: string]: unknown;
+}
+
+export interface SplitActiveStep {
+  step: number;
+  verdict?: {
+    trace_id: string;
+    shadow_branch_id: string;
+    status: Z3Status;
+    proof_latency_ms: number;
+    violated_invariants: ViolatedInvariant[];
+    smt2_dump: string;
+    sha256_proof_hash: string;
+  };
+  status_code?: number;
+  error?: string;
+  [key: string]: unknown;
+}
+
+export interface SplitBypassResult {
+  isolated_copy?: string;
+  steps: SplitBypassStep[];
+  capital_exposed_usd: number;
+  rows_lost: number;
+}
+
+export interface SplitActiveResult {
+  steps: SplitActiveStep[];
+  blocked: number;
+  committed: number;
+}
+
+export interface SplitComparisonResponse {
+  trace_id: string;
+  cartridge_id: CartridgeId;
+  bypass: SplitBypassResult;
+  active: SplitActiveResult;
+  total_latency_ms: number;
+}
+
+// ==========================================
+// Kernel Reset (POST /v1/kernel/reset)
+// ==========================================
+
+export interface KernelResetResponse {
+  status: string;
+  trace_id: string;
+  reset_latency_ms: number;
+  within_budget: boolean;
+  seed_ms: number;
+  rolled_back_branches: number;
+  sandboxes_dropped: number;
+  archived_audit_chain: string;
+}
+
+
