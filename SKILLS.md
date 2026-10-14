@@ -6,7 +6,7 @@ Invoke these skills explicitly by name (e.g., `Execute @skill:compile-z3-invaria
 
 | Skill ID | Owner | Trigger Use Case | Output Artifact | Verification Gate |
 | :--- | :--- | :--- | :--- | :--- |
-| `@skill:scaffold-cow-savepoint` | E1 | Adding/updating stateful CoW mutation handlers in `kernel-proxy` | Thread-pinned SQLite WAL Savepoint context manager | `P99 < 2.0ms` fork/rollback |
+| `@skill:scaffold-cow-savepoint` | E1 | Adding/updating stateful CoW mutation handlers in `kernel-proxy` | Pool-pinned PostgreSQL transaction + `SAVEPOINT` branch manager | `P99 < 2.0ms` fork/rollback |
 | `@skill:compile-z3-invariant` | E2 | Writing new formal rules or building the NL-to-Z3 compiler | Tracked Z3 solver function + 4-vector `pytest` suite | 100% pass on `SAT`/`UNSAT`/Boundary |
 | `@skill:build-domain-cartridge` | E3 | Creating a vertical scenario (seed DB + attack + self-healing retry) | Seed SQL + adversarial prompt + self-healing handler | E2E self-healing in 1 retry turn |
 | `@skill:wire-multiverse-node` | E4 | Adding custom ReactFlow nodes, drawers, or telemetry animations | TypeScript ReactFlow component + WebSocket reducer | 60fps render with 0 hydration errors |
@@ -16,63 +16,103 @@ Invoke these skills explicitly by name (e.g., `Execute @skill:compile-z3-invaria
 ---
 
 ## `@skill:scaffold-cow-savepoint`
-**Objective**: Implement a zero-copy, sub-2ms transactional shadow branch using `/dev/shm` SQLite WAL savepoints.
+**Objective**: Implement a sub-2ms transactional shadow branch on PostgreSQL 16 using a pool-pinned connection, one `REPEATABLE READ` transaction, and a named `SAVEPOINT`.
 
 ### Execution Pattern
-1. Open a dedicated SQLite connection to `/dev/shm/chronos_{cartridge_id}.db` with `check_same_thread=False`.
-2. Snapshot `state_pre` using a fast read query.
-3. Issue `SAVEPOINT {shadow_branch_id};`.
-4. Execute the parameterized SQL mutation representing `tool_call`.
-5. Snapshot `state_post_shadow` inside the uncommitted savepoint.
-6. Store the live connection in `self._pinned_branches[shadow_branch_id]` until E2's Z3 service responds.
-7. Execute `RELEASE SAVEPOINT {shadow_branch_id};` on `SAT` or `ROLLBACK TO SAVEPOINT {shadow_branch_id}; RELEASE SAVEPOINT {shadow_branch_id};` on `UNSAT`.
+1. At startup, open one `psycopg_pool.AsyncConnectionPool` per cartridge database (`{CHRONOS_PG_DSN}/chronos_{cartridge_id.lower()}`), configured for `REPEATABLE READ` and `dict_row`.
+2. Take a dedicated connection with `await pool.getconn()`. The first statement opens the transaction; bound it with `SET LOCAL lock_timeout = '2s'` and `SET LOCAL statement_timeout = '2s'`.
+3. Snapshot `state_pre` with a fast read query.
+4. Issue `SAVEPOINT {shadow_branch_id}`.
+5. Execute the parameterized SQL mutation representing `tool_call`.
+6. Snapshot `state_post_shadow` inside the uncommitted transaction.
+7. Pin the live connection in `self._pinned[shadow_branch_id]` until E2's Z3 service responds.
+8. On `SAT`: `RELEASE SAVEPOINT {shadow_branch_id}` then `COMMIT`. On `UNSAT` (or any verifier failure): `ROLLBACK`. Only then return the connection with `await pool.putconn(conn)`.
+9. A `COMMIT` that fails (e.g. `SQLSTATE 40001` serialization failure because a concurrent branch committed first) is a rejected branch: roll back and surface it, never retry silently.
 
 ### Reference Template
 ```python
-import sqlite3
 import time
 import uuid
-from typing import Any
+from typing import Any, Awaitable, Callable, Optional
+
+from psycopg import AsyncConnection, IsolationLevel
+from psycopg.rows import dict_row
+from psycopg_pool import AsyncConnectionPool
+
+StateReader = Callable[[AsyncConnection, dict[str, Any]], Awaitable[dict[str, Any]]]
+Mutation = Callable[[AsyncConnection, dict[str, Any]], Awaitable[Optional[dict[str, Any]]]]
+
+
+async def _configure(conn: AsyncConnection) -> None:
+    await conn.set_isolation_level(IsolationLevel.REPEATABLE_READ)
+
 
 class CoWBranchEngine:
-    def __init__(self, db_path: str):
-        self.db_path = db_path
-        self._pinned: dict[str, sqlite3.Connection] = {}
+    def __init__(self, dsn_base: str, cartridge_ids: list[str]):
+        self._pools = {
+            cid: AsyncConnectionPool(
+                f"{dsn_base}/chronos_{cid.lower()}",
+                min_size=2,
+                max_size=16,
+                open=False,
+                kwargs={"row_factory": dict_row},
+                configure=_configure,
+            )
+            for cid in cartridge_ids
+        }
+        self._pinned: dict[str, tuple[str, AsyncConnection]] = {}
 
-    def fork_and_mutate(self, state_reader_fn, mutation_fn, tool_args: dict[str, Any]) -> tuple[str, dict, dict, float]:
+    async def open(self) -> None:
+        for pool in self._pools.values():
+            await pool.open(wait=True)
+
+    async def close(self) -> None:
+        for branch_id in list(self._pinned):
+            await self.resolve(branch_id, commit=False)
+        for pool in self._pools.values():
+            await pool.close()
+
+    async def fork_and_mutate(
+        self, cartridge_id: str, state_reader_fn: StateReader, mutation_fn: Mutation, tool_call: dict[str, Any]
+    ) -> tuple[str, dict, dict, float]:
         t0 = time.perf_counter_ns()
         branch_id = f"cow_branch_{uuid.uuid4().hex[:8]}"
-        conn = sqlite3.connect(self.db_path, check_same_thread=False, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-
-        state_pre = state_reader_fn(conn)
-        conn.execute(f"SAVEPOINT {branch_id};")
+        pool = self._pools[cartridge_id]
+        conn = await pool.getconn()
         try:
-            mutation_fn(conn, tool_args)
-            state_post = state_reader_fn(conn)
-        except Exception:
-            conn.execute(f"ROLLBACK TO SAVEPOINT {branch_id};")
-            conn.execute(f"RELEASE SAVEPOINT {branch_id};")
-            conn.close()
+            # psycopg opens the REPEATABLE READ transaction on the first statement.
+            await conn.execute("SET LOCAL lock_timeout = '2s'")
+            await conn.execute("SET LOCAL statement_timeout = '2s'")
+            state_pre = await state_reader_fn(conn, tool_call)
+            await conn.execute(f"SAVEPOINT {branch_id}")
+            overlays = await mutation_fn(conn, tool_call)
+            state_post = await state_reader_fn(conn, tool_call)
+            if overlays:
+                state_post.update(overlays)
+        except BaseException:
+            await conn.rollback()
+            await pool.putconn(conn)
             raise
 
-        self._pinned[branch_id] = conn
+        self._pinned[branch_id] = (cartridge_id, conn)
         latency_ms = round((time.perf_counter_ns() - t0) / 1_000_000.0, 3)
         return branch_id, state_pre, state_post, latency_ms
 
-    def resolve(self, branch_id: str, commit: bool) -> float:
+    async def resolve(self, branch_id: str, commit: bool) -> float:
         t0 = time.perf_counter_ns()
-        conn = self._pinned.pop(branch_id)
+        cartridge_id, conn = self._pinned.pop(branch_id)
         try:
             if commit:
-                conn.execute(f"RELEASE SAVEPOINT {branch_id};")
+                await conn.execute(f"RELEASE SAVEPOINT {branch_id}")
+                await conn.commit()
             else:
-                conn.execute(f"ROLLBACK TO SAVEPOINT {branch_id};")
-                conn.execute(f"RELEASE SAVEPOINT {branch_id};")
+                await conn.rollback()
+        except BaseException:
+            await conn.rollback()  # e.g. 40001 on COMMIT: the branch is rejected
+            raise
         finally:
-            conn.close()
+            # Returned only after COMMIT/ROLLBACK, never mid-transaction.
+            await self._pools[cartridge_id].putconn(conn)
         return round((time.perf_counter_ns() - t0) / 1_000_000.0, 3)
 ```
 
@@ -165,7 +205,7 @@ def evaluate_fintech_invariants(state_pre: dict, state_post: dict) -> dict:
 **Objective**: Build a complete, self-healing industry scenario with deterministic seed state, an adversarial trigger prompt, and a 1-turn self-correction loop.
 
 ### Execution Checklist
-1. **Seed Function (`seed_{cartridge}.py`)**: Create clean SQLite tables in `/dev/shm/chronos_{cartridge_id}.db` and insert both the "Trap/Hazard Record" (e.g., spoofed IBAN, low-eGFR patient, production user table) and the "Safe Recovery Record" (e.g., verified backup vendor, historical physical therapy encounter `enc_108`, safe migration column).
+1. **Seed Function (`seed_{cartridge}.py`)**: Connect to `{CHRONOS_PG_DSN}/chronos_{cartridge_id.lower()}`, drop and recreate the cartridge's tables, bulk-load rows with `COPY`, and insert both the "Trap/Hazard Record" (e.g., spoofed IBAN, low-eGFR patient, production user table) and the "Safe Recovery Record" (e.g., verified backup vendor, historical physical therapy encounter `enc_108`, safe migration column).
 2. **Adversarial Trigger Prompt**: Craft the initial task prompt so a naive agent naturally picks the hazardous/non-compliant action on Turn 1.
 3. **Self-Healing Orchestrator Loop**:
    * Send Turn 1 tool call to `POST /v1/kernel/execute`.
@@ -198,7 +238,7 @@ def evaluate_fintech_invariants(state_pre: dict, state_post: dict) -> dict:
 1. Set `RECORD_REPLAY=1` and run `pytest tests/test_e2e_self_healing.py` across all 3 cartridges (`HEALTHCARE_FHIR`, `FINTECH_ESCROW`, `CLOUD_DEVOPS`) plus 3 custom English rules in the Live Policy Studio.
 2. Intercept every LLM response in `DeterministicReplayMiddleware` and store `(cartridge_id, turn_index, tool_call_json)` in `services/cartridges/replay_cache.sqlite`.
 3. Turn off laptop Wi-Fi (`nmcli radio wifi off` on CachyOS), set `OFFLINE_FALLBACK=auto`, and re-run `make demo-verify`.
-4. Confirm that while the agent's text/tool emission comes from the local cache on timeout, **100% of the SQLite CoW savepoint branching, Z3 mathematical proving, and WebSocket DAG streaming execute live on the CPU**.
+4. Confirm that while the agent's text/tool emission comes from the local cache on timeout, **100% of the PostgreSQL CoW savepoint branching (local Docker server), Z3 mathematical proving, and WebSocket DAG streaming execute live on the CPU**.
 
 ---
 
@@ -210,8 +250,9 @@ def evaluate_fintech_invariants(state_pre: dict, state_post: dict) -> dict:
 You are @redteam-auditor for CHRONOS-ZERO.
 Inspect the following git diff against AGENTS.md and Contracts 1-4:
 1. Are all JSON keys in requests/responses 100% identical to Contracts 1-4?
-2. Does any SQLite connection close or return to the pool before its SAVEPOINT is explicitly RELEASED or ROLLED BACK?
-3. Are all Z3 assertions registered with assert_and_track() and bounded by s.set("timeout", 50)?
-4. Is there any synchronous blocking network/disk call inside an async FastAPI route?
+2. Does any PostgreSQL connection return to the pool before its transaction is explicitly COMMITTED or ROLLED BACK, and does every branch set lock_timeout/statement_timeout?
+3. Can any agent-supplied SQL (COMMIT, BEGIN, SAVEPOINT, SET, COPY, DO, ...) escape or end the shadow branch?
+4. Are all Z3 assertions registered with assert_and_track() and bounded by s.set("timeout", 50)?
+5. Is there any synchronous blocking network/disk/database call inside an async FastAPI route?
 Output PASS or a numbered list of exact file:line fixes required.
 ```
