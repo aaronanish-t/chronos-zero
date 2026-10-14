@@ -44,7 +44,7 @@ RULE_REGISTRY: Dict[str, Dict[str, str]] = {
 
 def build_healthcare_solver(
     state_pre: Dict[str, Any], state_post: Dict[str, Any]
-) -> Tuple[Solver, Dict[str, Any]]:
+) -> Tuple[Solver, Dict[str, Any], List[Tuple[str, Any]]]:
     """Build Z3 solver instance with tracked invariants for HEALTHCARE_FHIR."""
     s = Solver()
     s.set("timeout", SOLVER_TIMEOUT_MS)
@@ -82,21 +82,24 @@ def build_healthcare_solver(
     s.add(dose_mg == IntVal(dose_mg_val))
 
     # Tracked Formal Assertions
-    s.assert_and_track(
-        Implies(egfr < RealVal(30.0), metformin_dose == IntVal(0)),
-        "INV_MED_01_RENAL_SAFETY",
-    )
-    s.assert_and_track(
-        Implies(claim_submitted == BoolVal(True), therapy_weeks >= IntVal(6)),
-        "INV_MED_02_PAYER_AUTH",
-    )
-    s.assert_and_track(
-        dose_mg <= IntVal(2000),
-        "INV_MED_03_MAX_DAILY_DOSE",
-    )
+    tracked_rules = [
+        (
+            "INV_MED_01_RENAL_SAFETY",
+            Implies(egfr < RealVal(30.0), metformin_dose == IntVal(0)),
+        ),
+        (
+            "INV_MED_02_PAYER_AUTH",
+            Implies(claim_submitted == BoolVal(True), therapy_weeks >= IntVal(6)),
+        ),
+        (
+            "INV_MED_03_MAX_DAILY_DOSE",
+            dose_mg <= IntVal(2000),
+        ),
+    ]
 
     context = {
         "egfr": egfr_val,
+        "patient_egfr_ml_min": egfr_val,
         "metformin_dose": metformin_dose_val,
         "prescribed_dose_metformin": metformin_dose_val,
         "dose_mg": dose_mg_val,
@@ -106,26 +109,39 @@ def build_healthcare_solver(
         "therapy_weeks": therapy_weeks_val,
         "conservative_therapy_weeks": therapy_weeks_val,
     }
-    return s, context
+    return s, context, tracked_rules
 
 
 def evaluate_healthcare_invariants(
     state_pre: Dict[str, Any], state_post: Dict[str, Any]
 ) -> Dict[str, Any]:
-    """Execute formal verification against HEALTHCARE_FHIR invariants."""
+    """Execute formal verification against HEALTHCARE_FHIR invariants.
+
+    Identifies ALL broken rules when multiple invariants fail simultaneously.
+    """
     t0 = time.perf_counter_ns()
     violated: List[Dict[str, str]] = []
     smt2_str = ""
 
     try:
-        s, context = build_healthcare_solver(state_pre, state_post)
-        verdict = s.check()
+        s, context, tracked_rules = build_healthcare_solver(state_pre, state_post)
+
+        failed_ids = []
+        for r_id, expr in tracked_rules:
+            s.push()
+            s.assert_and_track(expr, r_id)
+            if s.check() == unsat:
+                failed_ids.extend([str(c) for c in s.unsat_core()])
+            s.pop()
+
+        # Add all rules for SMT2 dump
+        for r_id, expr in tracked_rules:
+            s.assert_and_track(expr, r_id)
         smt2_str = s.to_smt2()
 
-        if verdict == unsat:
+        if failed_ids:
             status = "UNSAT"
-            for core_item in s.unsat_core():
-                r_id = str(core_item)
+            for r_id in sorted(list(set(failed_ids))):
                 meta = RULE_REGISTRY.get(r_id, {"formal": r_id, "remediation": f"{r_id} violated."})
                 if r_id == "INV_MED_01_RENAL_SAFETY":
                     cex = f"patient_egfr_ml_min={context['egfr']}, prescribed_dose_metformin={context['metformin_dose']}"
@@ -142,13 +158,18 @@ def evaluate_healthcare_invariants(
                     "counterexample": cex,
                     "remediation_hint": meta["remediation"].format(**context),
                 })
-        elif verdict == unknown:
-            status = "TIMEOUT"
         else:
             status = "SAT"
-    except Exception:
-        status = "ERROR"
+
+    except Exception as e:
+        status = "UNSAT"
         smt2_str = ""
+        violated.append({
+            "rule_id": "STATE_ERROR",
+            "formal_assertion": "valid_state_delta",
+            "counterexample": str(e),
+            "remediation_hint": f"Malformed state payload rejected: {str(e)}",
+        })
 
     proof_ms = round((time.perf_counter_ns() - t0) / 1_000_000.0, 3)
     proof_hash = hashlib.sha256(smt2_str.encode("utf-8")).hexdigest()

@@ -35,7 +35,7 @@ RULE_REGISTRY: Dict[str, Dict[str, str]] = {
 
 def build_devops_solver(
     state_pre: Dict[str, Any], state_post: Dict[str, Any]
-) -> Tuple[Solver, Dict[str, Any]]:
+) -> Tuple[Solver, Dict[str, Any], List[Tuple[str, Any]]]:
     """Build Z3 solver instance with tracked invariants for CLOUD_DEVOPS."""
     s = Solver()
     s.set("timeout", SOLVER_TIMEOUT_MS)
@@ -72,11 +72,13 @@ def build_devops_solver(
     s.add(port == IntVal(port_val))
 
     # Tracked assertions
-    s.assert_and_track(rows_post >= rows_pre, "INV_OPS_01_ZERO_DATA_LOSS")
-    s.assert_and_track(
-        Not(And(cidr_open == BoolVal(True), port == IntVal(22))),
-        "INV_OPS_02_NO_PUBLIC_ADMIN_PORT",
-    )
+    tracked_rules = [
+        ("INV_OPS_01_ZERO_DATA_LOSS", rows_post >= rows_pre),
+        (
+            "INV_OPS_02_NO_PUBLIC_ADMIN_PORT",
+            Not(And(cidr_open == BoolVal(True), port == IntVal(22))),
+        ),
+    ]
 
     delta = rows_post_val - rows_pre_val
     context = {
@@ -88,26 +90,39 @@ def build_devops_solver(
         "cidr_open_world": cidr_open_val,
         "port_number": port_val,
     }
-    return s, context
+    return s, context, tracked_rules
 
 
 def evaluate_cloud_devops_invariants(
     state_pre: Dict[str, Any], state_post: Dict[str, Any]
 ) -> Dict[str, Any]:
-    """Execute formal verification against CLOUD_DEVOPS invariants."""
+    """Execute formal verification against CLOUD_DEVOPS invariants.
+
+    Identifies ALL broken rules when multiple invariants fail simultaneously.
+    """
     t0 = time.perf_counter_ns()
     violated: List[Dict[str, str]] = []
     smt2_str = ""
 
     try:
-        s, context = build_devops_solver(state_pre, state_post)
-        verdict = s.check()
+        s, context, tracked_rules = build_devops_solver(state_pre, state_post)
+
+        failed_ids = []
+        for r_id, expr in tracked_rules:
+            s.push()
+            s.assert_and_track(expr, r_id)
+            if s.check() == unsat:
+                failed_ids.extend([str(c) for c in s.unsat_core()])
+            s.pop()
+
+        # Add all rules for SMT2 dump
+        for r_id, expr in tracked_rules:
+            s.assert_and_track(expr, r_id)
         smt2_str = s.to_smt2()
 
-        if verdict == unsat:
+        if failed_ids:
             status = "UNSAT"
-            for core_item in s.unsat_core():
-                r_id = str(core_item)
+            for r_id in sorted(list(set(failed_ids))):
                 meta = RULE_REGISTRY.get(r_id, {"formal": r_id, "remediation": f"{r_id} violated."})
                 if r_id == "INV_OPS_01_ZERO_DATA_LOSS":
                     cex = (
@@ -129,13 +144,18 @@ def evaluate_cloud_devops_invariants(
                     "counterexample": cex,
                     "remediation_hint": meta["remediation"].format(**context),
                 })
-        elif verdict == unknown:
-            status = "TIMEOUT"
         else:
             status = "SAT"
-    except Exception:
-        status = "ERROR"
+
+    except Exception as e:
+        status = "UNSAT"
         smt2_str = ""
+        violated.append({
+            "rule_id": "STATE_ERROR",
+            "formal_assertion": "valid_state_delta",
+            "counterexample": str(e),
+            "remediation_hint": f"Malformed state payload rejected: {str(e)}",
+        })
 
     proof_ms = round((time.perf_counter_ns() - t0) / 1_000_000.0, 3)
     proof_hash = hashlib.sha256(smt2_str.encode("utf-8")).hexdigest()

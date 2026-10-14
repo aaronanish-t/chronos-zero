@@ -5,7 +5,7 @@ Validates Z3 SMT mathematical proofs across all 3 domain cartridges:
 - FINTECH_ESCROW (INV_FIN_01, INV_FIN_02)
 - CLOUD_DEVOPS (INV_OPS_01, INV_OPS_02)
 
-Checks SAT, UNSAT, exact boundary conditions, UnsatCore extraction, and SHA-256 receipts.
+Checks SAT, UNSAT, exact boundary conditions, UnsatCore extraction, multi-rule simultaneous violations, and SHA-256 receipts.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from invariants.fintech_escrow import evaluate_fintech_invariants  # noqa: E402
 from invariants.cloud_devops import evaluate_cloud_devops_invariants  # noqa: E402
 
 
-def payload(egfr=24.0, drug="Metformin", dose=2500, claim=True, weeks=2):
+def payload(egfr=24.0, drug="Metformin", dose=1000, claim=True, weeks=2):
     return {
         "trace_id": "tr_test",
         "shadow_branch_id": "cow_branch_test",
@@ -49,7 +49,7 @@ def rules(verdict):
 # ---------------------------------------------------------------------------
 
 def test_renal_safety_true_negative_unsat():
-    v = verify_state_diff(payload(egfr=24.0, drug="Metformin", dose=2500, claim=False))
+    v = verify_state_diff(payload(egfr=24.0, drug="Metformin", dose=1000, claim=False))
     assert v["status"] == "UNSAT"
     assert rules(v) == {"INV_MED_01_RENAL_SAFETY"}
 
@@ -111,11 +111,22 @@ def test_healthcare_max_daily_dose_boundary():
     assert res["violated_invariants"] == []
 
 
+def test_healthcare_multi_rule_simultaneous_violations():
+    """Verify all 3 rules are reported when eGFR, claim auth, and dose cap are all violated."""
+    v = verify_state_diff(payload(egfr=24.0, drug="Metformin", dose=2500, claim=True, weeks=2))
+    assert v["status"] == "UNSAT"
+    assert rules(v) == {
+        "INV_MED_01_RENAL_SAFETY",
+        "INV_MED_02_PAYER_AUTH",
+        "INV_MED_03_MAX_DAILY_DOSE",
+    }
+
+
 def test_malformed_state_fails_closed():
     bad = payload()
     del bad["state_post_shadow"]["patient_egfr_ml_min"]
     v = verify_state_diff(bad)
-    assert v["status"] == "ERROR"
+    assert v["status"] == "UNSAT"
     assert v["status"] != "SAT"
 
 
@@ -150,6 +161,21 @@ def test_fintech_sla_attestation_unsat():
     assert "INV_FIN_02_SLA_ATTESTATION" in {v["rule_id"] for v in res["violated_invariants"]}
 
 
+def test_fintech_spoofed_wire_reports_both_rules():
+    """Verify $12,000 wire reports BOTH INV_FIN_01_ESCROW_CAP and INV_FIN_02_SLA_ATTESTATION."""
+    res = evaluate_fintech_invariants(
+        state_pre={"daily_escrow_spent_usd": 4200.0, "daily_escrow_limit_usd": 5000.0},
+        state_post={
+            "transfer_amount_usd": 12000.0,
+            "vendor_latency_ms": 640.0,
+            "iban_allowlisted": False,
+        },
+    )
+    assert res["status"] == "UNSAT"
+    violated = {v["rule_id"] for v in res["violated_invariants"]}
+    assert violated == {"INV_FIN_01_ESCROW_CAP", "INV_FIN_02_SLA_ATTESTATION"}
+
+
 def test_fintech_boundary_exact_cap_passes():
     """Exact remaining cap spend + transfer == limit passes."""
     res = evaluate_fintech_invariants(
@@ -181,6 +207,17 @@ def test_cloud_devops_admin_port_unsat():
     )
     assert res["status"] == "UNSAT"
     assert "INV_OPS_02_NO_PUBLIC_ADMIN_PORT" in {v["rule_id"] for v in res["violated_invariants"]}
+
+
+def test_cloud_devops_multi_rule_reports_both_rules():
+    """Verify simultaneous drop table and port 22 exposure reports BOTH rules."""
+    res = evaluate_cloud_devops_invariants(
+        state_pre={"prod_table_row_count_pre": 15420},
+        state_post={"prod_table_row_count_post": 0, "cidr_open_world": True, "port_number": 22},
+    )
+    assert res["status"] == "UNSAT"
+    violated = {v["rule_id"] for v in res["violated_invariants"]}
+    assert violated == {"INV_OPS_01_ZERO_DATA_LOSS", "INV_OPS_02_NO_PUBLIC_ADMIN_PORT"}
 
 
 def test_cloud_devops_boundary_equal_row_count_passes():

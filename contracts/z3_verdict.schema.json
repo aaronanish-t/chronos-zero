@@ -8,7 +8,7 @@
   "properties": {
     "trace_id": { "type": "string" },
     "shadow_branch_id": { "type": "string" },
-    "status": { "enum": ["SAT", "UNSAT", "TIMEOUT", "ERROR"] },
+    "status": { "enum": ["SAT", "UNSAT"] },
     "proof_latency_ms": { "type": "number", "minimum": 0 },
     "violated_invariants": {
       "type": "array",

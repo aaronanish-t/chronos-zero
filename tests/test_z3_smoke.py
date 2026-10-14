@@ -3,6 +3,7 @@
 Verifies:
 - POST /v1/z3/verify responds in under 5ms (Z3 proof latency and HTTP round-trip).
 - Formal invariant verification across HEALTHCARE_FHIR, FINTECH_ESCROW, and CLOUD_DEVOPS.
+- Multi-rule detection: reports all broken rules simultaneously (e.g. $12,000 wire reports cap + SLA).
 - Dynamic policy compilation via POST /v1/z3/compile-policy.
 - Health check and solver readiness via GET /health.
 """
@@ -62,7 +63,7 @@ def test_verify_responds_under_5ms(client: TestClient):
         "state_post_shadow": {
             "patient_egfr_ml_min": 24.0,
             "prescribed_drug": "Metformin",
-            "prescribed_dose_mg": 2500,
+            "prescribed_dose_mg": 1000,
             "claim_submitted": False,
             "conservative_therapy_weeks": 2,
         },
@@ -81,27 +82,28 @@ def test_verify_responds_under_5ms(client: TestClient):
         assert data["status"] == "UNSAT"
         assert data["proof_latency_ms"] < 5.0, f"Z3 proof latency exceeded 5ms: {data['proof_latency_ms']}ms"
 
-    # Verify best-of / average round-trip is strictly sub-5ms
+    # Verify best-of round-trip is strictly sub-5ms
     min_latency = min(latencies)
     assert min_latency < 5.0, f"HTTP round-trip latency exceeded 5ms: {min_latency:.3f}ms"
 
 
 def test_verify_fintech_escrow(client: TestClient):
-    """Verify FINTECH_ESCROW invariants and latency."""
-    # Test UNSAT on wire cap exceeded
+    """Verify FINTECH_ESCROW reports BOTH broken rules on the $12,000 wire."""
+    # Test simultaneous violation: wire cap exceeded AND SLA failed (spoofed IBAN + 640ms latency)
     unsat_payload = {
         "trace_id": "tr_fin_unsat",
         "shadow_branch_id": "cow_branch_fin_1",
         "cartridge_id": "FINTECH_ESCROW",
         "cow_fork_latency_ms": 0.4,
         "state_pre": {
-            "daily_escrow_spent_usd": 45000.0,
-            "daily_escrow_limit_usd": 50000.0,
+            "daily_escrow_spent_usd": 4200.0,
+            "daily_escrow_limit_usd": 5000.0,
+            "transfer_amount_usd": 0.0,
         },
         "state_post_shadow": {
             "transfer_amount_usd": 12000.0,
-            "vendor_latency_ms": 150.0,
-            "iban_allowlisted": True,
+            "vendor_latency_ms": 640.0,
+            "iban_allowlisted": False,
         },
     }
     t0 = time.perf_counter_ns()
@@ -113,28 +115,8 @@ def test_verify_fintech_escrow(client: TestClient):
     assert data["proof_latency_ms"] < 5.0
     assert elapsed_ms < 5.0
     violated = {v["rule_id"] for v in data["violated_invariants"]}
-    assert "INV_FIN_01_ESCROW_CAP" in violated
-
-    # Test UNSAT on SLA latency violation
-    sla_unsat_payload = {
-        "trace_id": "tr_fin_sla_unsat",
-        "shadow_branch_id": "cow_branch_fin_sla",
-        "cartridge_id": "FINTECH_ESCROW",
-        "cow_fork_latency_ms": 0.4,
-        "state_pre": {
-            "daily_escrow_spent_usd": 1000.0,
-            "daily_escrow_limit_usd": 50000.0,
-        },
-        "state_post_shadow": {
-            "transfer_amount_usd": 1000.0,
-            "vendor_latency_ms": 350.0,
-            "iban_allowlisted": True,
-        },
-    }
-    res_sla = client.post("/v1/z3/verify", json=sla_unsat_payload)
-    assert res_sla.status_code == 200
-    assert res_sla.json()["status"] == "UNSAT"
-    assert "INV_FIN_02_SLA_ATTESTATION" in {v["rule_id"] for v in res_sla.json()["violated_invariants"]}
+    # Crucial: BOTH rules must be reported
+    assert violated == {"INV_FIN_01_ESCROW_CAP", "INV_FIN_02_SLA_ATTESTATION"}
 
     # Test SAT on compliant wire
     sat_payload = {
@@ -159,10 +141,9 @@ def test_verify_fintech_escrow(client: TestClient):
 
 
 def test_verify_cloud_devops(client: TestClient):
-    """Verify CLOUD_DEVOPS invariants and latency."""
-    # Test UNSAT on destructive drop table (row loss)
-    unsat_row_payload = {
-        "trace_id": "tr_ops_row_unsat",
+    """Verify CLOUD_DEVOPS reports BOTH broken rules on drop table + open port 22."""
+    unsat_payload = {
+        "trace_id": "tr_ops_unsat",
         "shadow_branch_id": "cow_branch_ops_1",
         "cartridge_id": "CLOUD_DEVOPS",
         "cow_fork_latency_ms": 0.4,
@@ -171,12 +152,12 @@ def test_verify_cloud_devops(client: TestClient):
         },
         "state_post_shadow": {
             "prod_table_row_count_post": 0,
-            "cidr_open_world": False,
-            "port_number": 443,
+            "cidr_open_world": True,
+            "port_number": 22,
         },
     }
     t0 = time.perf_counter_ns()
-    res = client.post("/v1/z3/verify", json=unsat_row_payload)
+    res = client.post("/v1/z3/verify", json=unsat_payload)
     elapsed_ms = (time.perf_counter_ns() - t0) / 1_000_000.0
     assert res.status_code == 200
     data = res.json()
@@ -184,33 +165,13 @@ def test_verify_cloud_devops(client: TestClient):
     assert data["proof_latency_ms"] < 5.0
     assert elapsed_ms < 5.0
     violated = {v["rule_id"] for v in data["violated_invariants"]}
-    assert "INV_OPS_01_ZERO_DATA_LOSS" in violated
-
-    # Test UNSAT on port 22 exposed to 0.0.0.0/0
-    unsat_port_payload = {
-        "trace_id": "tr_ops_port_unsat",
-        "shadow_branch_id": "cow_branch_ops_2",
-        "cartridge_id": "CLOUD_DEVOPS",
-        "cow_fork_latency_ms": 0.4,
-        "state_pre": {
-            "prod_table_row_count_pre": 15420,
-        },
-        "state_post_shadow": {
-            "prod_table_row_count_post": 15420,
-            "cidr_open_world": True,
-            "port_number": 22,
-        },
-    }
-    res_port = client.post("/v1/z3/verify", json=unsat_port_payload)
-    assert res_port.status_code == 200
-    data_port = res_port.json()
-    assert data_port["status"] == "UNSAT"
-    assert "INV_OPS_02_NO_PUBLIC_ADMIN_PORT" in {v["rule_id"] for v in data_port["violated_invariants"]}
+    # Crucial: BOTH rules must be reported
+    assert violated == {"INV_OPS_01_ZERO_DATA_LOSS", "INV_OPS_02_NO_PUBLIC_ADMIN_PORT"}
 
     # Test SAT on non-destructive migration
     sat_payload = {
         "trace_id": "tr_ops_sat",
-        "shadow_branch_id": "cow_branch_ops_3",
+        "shadow_branch_id": "cow_branch_ops_2",
         "cartridge_id": "CLOUD_DEVOPS",
         "cow_fork_latency_ms": 0.4,
         "state_pre": {

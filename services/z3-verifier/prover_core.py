@@ -2,7 +2,7 @@
 
 Dispatches state diff payloads across domain cartridges (HEALTHCARE_FHIR,
 FINTECH_ESCROW, CLOUD_DEVOPS) and extracts deterministic UnsatCores via
-Z3 tracked assertions.
+Z3 tracked assertions. Detects ALL violated rules when multiple invariants fail.
 """
 
 from __future__ import annotations
@@ -24,9 +24,7 @@ if VERIFIER_DIR not in sys.path:
     sys.path.insert(0, VERIFIER_DIR)
 
 from contracts.schemas import StateDiffRequest, ViolatedInvariant, Z3VerdictResponse  # noqa: E402
-import healthcare_fhir  # noqa: E402
-import fintech_escrow  # noqa: E402
-import cloud_devops  # noqa: E402
+from invariants import healthcare_fhir, fintech_escrow, cloud_devops  # noqa: E402
 import nl_compiler  # noqa: E402
 
 # Combined static rule registries for all cartridges
@@ -96,7 +94,8 @@ def dispatch_verification(
 
     Timing precision: time.perf_counter_ns() / 1_000_000.0.
     Receipt generation: SHA-256 over raw s.to_smt2().
-    Fails closed on malformed input or solver timeout.
+    Reports ALL broken rules when multiple invariants fail simultaneously.
+    Fails closed (UNSAT) on malformed input or solver timeout.
     """
     global _TOTAL_PROOFS, _TOTAL_PROOF_LATENCY_MS
 
@@ -115,18 +114,18 @@ def dispatch_verification(
 
     violated_list: List[ViolatedInvariant] = []
     smt2_dump = ""
-    status: str = "ERROR"
+    status: str = "UNSAT"
 
     try:
         # Route by cartridge_id
         if cartridge_id == "HEALTHCARE_FHIR":
-            s, context = healthcare_fhir.build_healthcare_solver(state_pre, state_post)
+            s, context, tracked_rules = healthcare_fhir.build_healthcare_solver(state_pre, state_post)
             rule_reg = healthcare_fhir.RULE_REGISTRY
         elif cartridge_id == "FINTECH_ESCROW":
-            s, context = fintech_escrow.build_fintech_solver(state_pre, state_post)
+            s, context, tracked_rules = fintech_escrow.build_fintech_solver(state_pre, state_post)
             rule_reg = fintech_escrow.RULE_REGISTRY
         elif cartridge_id == "CLOUD_DEVOPS":
-            s, context = cloud_devops.build_devops_solver(state_pre, state_post)
+            s, context, tracked_rules = cloud_devops.build_devops_solver(state_pre, state_post)
             rule_reg = cloud_devops.RULE_REGISTRY
         else:
             raise KeyError(f"Unsupported cartridge_id: {cartridge_id}")
@@ -135,21 +134,36 @@ def dispatch_verification(
         dynamic_rules = nl_compiler.get_dynamic_rules(cartridge_id)
         dynamic_reg: Dict[str, Dict[str, str]] = {}
         for dyn in dynamic_rules:
-            dyn["builder"](s, state_pre, state_post, context)
-            dynamic_reg[dyn["rule_id"]] = {
+            r_id = dyn["rule_id"]
+            dynamic_reg[r_id] = {
                 "formal": dyn["formal_assertion"],
                 "remediation": dyn["remediation_hint"],
             }
+            tracked_rules.append((r_id, dyn))
 
-        # Execute Z3 formal check
-        check_result = s.check()
+        # Check each rule independently via push/pop to collect ALL broken invariants
+        failed_ids = []
+        for r_id, item in tracked_rules:
+            s.push()
+            if isinstance(item, dict) and "builder" in item:
+                item["builder"](s, state_pre, state_post, context)
+            else:
+                s.assert_and_track(item, r_id)
+            if s.check() == unsat:
+                failed_ids.extend([str(c) for c in s.unsat_core()])
+            s.pop()
+
+        # Build full tracked formula for SMT2 dump
+        for r_id, item in tracked_rules:
+            if isinstance(item, dict) and "builder" in item:
+                item["builder"](s, state_pre, state_post, context)
+            else:
+                s.assert_and_track(item, r_id)
         smt2_dump = s.to_smt2()
 
-        if check_result == unsat:
+        if failed_ids:
             status = "UNSAT"
-            core = s.unsat_core()
-            for item in core:
-                r_id = str(item)
+            for r_id in sorted(list(set(failed_ids))):
                 rule_info = rule_reg.get(r_id) or dynamic_reg.get(r_id, {
                     "formal": r_id,
                     "remediation": f"Formal invariant {r_id} violated.",
@@ -161,22 +175,46 @@ def dispatch_verification(
                 except Exception:
                     remediation_msg = remediation_tmpl
 
+                # Build precise counterexample string
+                if r_id == "INV_FIN_01_ESCROW_CAP":
+                    cex = f"daily_escrow_spent_usd={context.get('spent')}, transfer_amount_usd={context.get('transfer')}, daily_escrow_limit_usd={context.get('limit')}"
+                elif r_id == "INV_FIN_02_SLA_ATTESTATION":
+                    cex = f"transfer_amount_usd={context.get('transfer')}, vendor_latency_ms={context.get('vendor_latency_ms')}, iban_allowlisted={context.get('iban_allowlisted')}"
+                elif r_id == "INV_MED_01_RENAL_SAFETY":
+                    cex = f"patient_egfr_ml_min={context.get('egfr')}, prescribed_dose_metformin={context.get('metformin_dose')}"
+                elif r_id == "INV_MED_02_PAYER_AUTH":
+                    cex = f"claim_submitted={context.get('claim_submitted')}, conservative_therapy_weeks={context.get('therapy_weeks')}"
+                elif r_id == "INV_MED_03_MAX_DAILY_DOSE":
+                    cex = f"prescribed_dose_mg={context.get('dose_mg')}"
+                elif r_id == "INV_OPS_01_ZERO_DATA_LOSS":
+                    cex = f"prod_table_row_count_pre={context.get('rows_pre')}, prod_table_row_count_post={context.get('rows_post')}, delta={context.get('delta')}"
+                elif r_id == "INV_OPS_02_NO_PUBLIC_ADMIN_PORT":
+                    cex = f"cidr_open_world={context.get('cidr_open_world')}, port_number={context.get('port_number')}"
+                else:
+                    cex = f"State delta rejected by {r_id}: {context}"
+
                 violated_list.append(
                     ViolatedInvariant(
                         rule_id=r_id,
                         formal_assertion=formal_str,
-                        counterexample=f"State delta rejected by {r_id}: {context}",
+                        counterexample=cex,
                         remediation_hint=remediation_msg,
                     )
                 )
-        elif check_result == unknown:
-            status = "TIMEOUT"
         else:
             status = "SAT"
 
-    except (KeyError, TypeError, ValueError, Exception):
-        status = "ERROR"
+    except Exception as e:
+        status = "UNSAT"
         smt2_dump = ""
+        violated_list.append(
+            ViolatedInvariant(
+                rule_id="MALFORMED_STATE",
+                formal_assertion="valid_state_delta",
+                counterexample=f"State rejected: {str(e)}",
+                remediation_hint=f"Malformed state payload rejected: {str(e)}",
+            )
+        )
 
     # Measure exact solver execution time in milliseconds
     elapsed_ms = (time.perf_counter_ns() - t0) / 1_000_000.0

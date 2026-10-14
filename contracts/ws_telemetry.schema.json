@@ -7,7 +7,7 @@
   "required": ["event_type", "trace_id", "cartridge_id", "node"],
   "additionalProperties": false,
   "properties": {
-    "event_type": { "enum": ["BRANCH_EVALUATED", "BYPASS_CORRUPTED"] },
+    "event_type": { "enum": ["BRANCH_EVALUATED", "BYPASS_CORRUPTED", "POLICY_COMPILED", "DEMO_RESET"] },
     "trace_id": { "type": "string" },
     "cartridge_id": { "enum": ["HEALTHCARE_FHIR", "FINTECH_ESCROW", "CLOUD_DEVOPS"] },
     "node": {
@@ -16,11 +16,11 @@
       "additionalProperties": false,
       "properties": {
         "id": { "type": "string" },
-        "parent_id": { "type": ["string", "null"] },
-        "branch_type": { "enum": ["ROOT", "SHADOW_REJECTED", "COMMITTED_SAFE", "BYPASS_CORRUPTED"] },
+        "parent_id": { "type": "string" },
+        "branch_type": { "enum": ["SHADOW_REJECTED", "COMMITTED_SAFE", "BYPASS_CORRUPTED", "SYSTEM_EVENT"] },
         "action_label": { "type": "string" },
         "total_latency_ms": { "type": "number", "minimum": 0 },
-        "z3_verdict": { "enum": ["SAT", "UNSAT", "TIMEOUT", "ERROR", "NONE"] },
+        "z3_verdict": { "enum": ["SAT", "UNSAT", "BYPASS", "N/A"] },
         "violated_rules": { "type": "array", "items": { "type": "string" } },
         "financial_loss_prevented_usd": { "type": "number", "minimum": 0 },
         "clinical_hazard_prevented": { "type": "boolean" }

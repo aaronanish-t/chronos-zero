@@ -9,9 +9,10 @@ from __future__ import annotations
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException, status
+from pydantic import BaseModel, Field
 import uvicorn
 
 # Ensure repository root is on sys.path
@@ -24,8 +25,6 @@ if VERIFIER_DIR not in sys.path:
     sys.path.insert(0, VERIFIER_DIR)
 
 from contracts.schemas import (  # noqa: E402
-    PolicyCompileRequest,
-    PolicyCompileResponse,
     StateDiffRequest,
     Z3VerdictResponse,
 )
@@ -35,6 +34,25 @@ from prover_core import (  # noqa: E402
     prewarm_solvers,
 )
 import nl_compiler  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Policy Studio Request / Response models (local to Z3 verifier service)
+# ---------------------------------------------------------------------------
+
+class PolicyCompileRequest(BaseModel):
+    cartridge_id: str
+    rule_id: str
+    natural_language_rule: str
+
+
+class PolicyCompileResponse(BaseModel):
+    status: str
+    cartridge_id: str
+    rule_id: str
+    formal_assertion: str
+    smt2_template: Optional[str] = None
+    message: str = ""
 
 
 @asynccontextmanager
