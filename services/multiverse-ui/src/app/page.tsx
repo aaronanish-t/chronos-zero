@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useChronosWS } from "../hooks/useChronosWS";
 import { TopTelemetryBar } from "../components/TopTelemetryBar";
 import { MultiverseDAG } from "../components/MultiverseDAG";
@@ -30,6 +30,57 @@ export default function MissionControlPage() {
 
   const [isInspectorOpen, setIsInspectorOpen] = useState(true);
   const [isSplitDemoOpen, setIsSplitDemoOpen] = useState(false);
+
+  // Stage Pilot Keyboard Shortcuts:
+  // Key 1: Switch to HEALTHCARE_FHIR
+  // Key 2: Switch to FINTECH_ESCROW
+  // Key 3: Switch to CLOUD_DEVOPS
+  // Spacebar: Trigger active scenario run
+  // Key R: Instant <200ms demo reset (POST /v1/kernel/reset)
+  // Key S: Toggle Split-Screen (BYPASS vs ACTIVE) mode
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (
+        target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.isContentEditable
+      ) {
+        return;
+      }
+
+      if (e.key === "1") {
+        e.preventDefault();
+        setActiveCartridge("HEALTHCARE_FHIR");
+      } else if (e.key === "2") {
+        e.preventDefault();
+        setActiveCartridge("FINTECH_ESCROW");
+      } else if (e.key === "3") {
+        e.preventDefault();
+        setActiveCartridge("CLOUD_DEVOPS");
+      } else if (e.code === "Space") {
+        e.preventDefault();
+        if (!isSimulating) {
+          simulateMockTelemetry(activeCartridge);
+        }
+      } else if (e.key === "r" || e.key === "R") {
+        e.preventDefault();
+        resetDAG();
+      } else if (e.key === "s" || e.key === "S") {
+        e.preventDefault();
+        setIsSplitDemoOpen((prev) => !prev);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [
+    activeCartridge,
+    isSimulating,
+    resetDAG,
+    setActiveCartridge,
+    simulateMockTelemetry,
+  ]);
 
   return (
     <main className="flex flex-col h-screen w-screen overflow-hidden bg-[#090D16]">

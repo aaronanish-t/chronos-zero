@@ -6,6 +6,7 @@ import {
   TelemetryNode,
   CartridgeId,
   ViolatedInvariant,
+  KernelResetResponse,
 } from "../types/contracts";
 
 export interface NodePosition {
@@ -108,6 +109,26 @@ export function useChronosWS() {
   const processTelemetryEvent = useCallback(
     (event: TelemetryEvent) => {
       setEvents((prev) => [event, ...prev.slice(0, 99)]);
+
+      // Handle stage reset event from kernel (POST /v1/kernel/reset broadcast)
+      if (event.event_type === "DEMO_RESET" || event.node?.action_label === "DEMO_RESET") {
+        setNodes([]);
+        setEdges([]);
+        setSelectedNode(null);
+        setBypassActiveAlert(null);
+        setMetrics({
+          totalBranches: 0,
+          unsatRollbacks: 0,
+          satCommitted: 0,
+          bypassCorrupted: 0,
+          financialLossPreventedUsd: 0,
+          clinicalHazardsPrevented: 0,
+          avgTotalLatencyMs: 0,
+          lastProofLatencyMs: 0,
+          lastCowForkLatencyMs: 0,
+        });
+        return;
+      }
 
       const rawNode = event.node;
 
@@ -278,7 +299,7 @@ export function useChronosWS() {
     };
   }, [connectWebSocket]);
 
-  // Reset DAG and metrics
+  // Reset DAG, metrics, and call live kernel stage reset (POST /v1/kernel/reset)
   const resetDAG = useCallback(() => {
     simulationTimersRef.current.forEach(clearTimeout);
     simulationTimersRef.current = [];
@@ -299,6 +320,27 @@ export function useChronosWS() {
       lastProofLatencyMs: 0,
       lastCowForkLatencyMs: 0,
     });
+
+    // Fire non-blocking POST /v1/kernel/reset
+    const endpoints = ["http://localhost:8000/v1/kernel/reset", "/v1/kernel/reset"];
+    (async () => {
+      for (const url of endpoints) {
+        try {
+          const res = await fetch(url, {
+            method: "POST",
+            headers: { Accept: "application/json" },
+            signal: AbortSignal.timeout(1500),
+          });
+          if (res.ok) {
+            const data: KernelResetResponse = await res.json();
+            console.log("[ChronosWS] Live kernel reset succeeded:", data);
+            break;
+          }
+        } catch {
+          // try next endpoint or fallback
+        }
+      }
+    })();
   }, []);
 
   // 60fps Mock Simulation Engine

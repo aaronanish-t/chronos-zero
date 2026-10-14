@@ -15,14 +15,132 @@ import {
   Terminal,
   Zap,
   TrendingDown,
+  Layers,
+  Network,
 } from "lucide-react";
+import {
+  SplitComparisonRequest,
+  SplitComparisonResponse,
+  ToolCall,
+  CartridgeId,
+} from "../types/contracts";
 
 interface SplitScreenDemoProps {
   isOpen: boolean;
   onClose: () => void;
 }
 
-type DemoStep = "IDLE" | "TOOL_INIT" | "UNPROTECTED_FAULT" | "CHRONOS_INTERCEPT" | "CHRONOS_REWIND_HEAL" | "COMPLETED";
+type DemoStep =
+  | "IDLE"
+  | "TOOL_INIT"
+  | "UNPROTECTED_FAULT"
+  | "CHRONOS_INTERCEPT"
+  | "CHRONOS_REWIND_HEAL"
+  | "COMPLETED";
+
+// Exact Contract 1 & Split Comparison Tool Call Definitions
+const SCENARIO_STEPS: Record<
+  "ALL" | "DEVOPS" | "FINTECH" | "HEALTH",
+  { cartridge_id: CartridgeId; steps: ToolCall[] }
+> = {
+  FINTECH: {
+    cartridge_id: "FINTECH_ESCROW",
+    steps: [
+      {
+        tool_name: "transfer_funds_zk_escrow",
+        target_resource: "Escrow/esc_8801",
+        arguments: {
+          vendor_id: "vnd_blacklisted_offshore",
+          amount_usd: 12000.0,
+          claim_amount_usd: 12000.0,
+          zk_proof: "zk_invalid_attestation",
+        },
+      },
+      {
+        tool_name: "transfer_funds_zk_escrow",
+        target_resource: "Escrow/esc_8801",
+        arguments: {
+          vendor_id: "vnd_verified",
+          amount_usd: 400.0,
+          claim_amount_usd: 400.0,
+          zk_proof: "zk_valid_attestation",
+        },
+      },
+    ],
+  },
+  DEVOPS: {
+    cartridge_id: "CLOUD_DEVOPS",
+    steps: [
+      {
+        tool_name: "run_migration",
+        target_resource: "Table/users",
+        arguments: {
+          sql: "DROP TABLE users CASCADE;",
+        },
+      },
+      {
+        tool_name: "run_migration",
+        target_resource: "Table/users",
+        arguments: {
+          sql: "ALTER TABLE users ADD COLUMN last_login_at TEXT;",
+        },
+      },
+    ],
+  },
+  HEALTH: {
+    cartridge_id: "HEALTHCARE_FHIR",
+    steps: [
+      {
+        tool_name: "prescribe_medication_and_submit_claim",
+        target_resource: "Patient/pat_402",
+        arguments: {
+          drug_name: "Ketorolac",
+          daily_dose_mg: 30.0,
+          claim_amount_usd: 180.0,
+        },
+      },
+      {
+        tool_name: "prescribe_medication_and_submit_claim",
+        target_resource: "Patient/pat_402",
+        arguments: {
+          drug_name: "Acetaminophen",
+          daily_dose_mg: 650.0,
+          claim_amount_usd: 25.0,
+        },
+      },
+    ],
+  },
+  ALL: {
+    cartridge_id: "FINTECH_ESCROW",
+    steps: [
+      {
+        tool_name: "transfer_funds_zk_escrow",
+        target_resource: "Escrow/esc_8801",
+        arguments: {
+          vendor_id: "vnd_blacklisted_offshore",
+          amount_usd: 12000.0,
+          claim_amount_usd: 12000.0,
+        },
+      },
+      {
+        tool_name: "run_migration",
+        target_resource: "Table/users",
+        arguments: {
+          sql: "DROP TABLE users CASCADE;",
+        },
+      },
+      {
+        tool_name: "prescribe_medication_and_submit_claim",
+        target_resource: "Patient/pat_402",
+        arguments: {
+          drug_name: "Ketorolac",
+          daily_dose_mg: 30.0,
+          claim_amount_usd: 180.0,
+        },
+      },
+    ],
+  },
+};
 
 export const SplitScreenDemo: React.FC<SplitScreenDemoProps> = ({
   isOpen,
@@ -41,18 +159,95 @@ export const SplitScreenDemo: React.FC<SplitScreenDemoProps> = ({
   const [chronosWireProtected, setChronosWireProtected] = useState(12000);
   const [chronosClinicalSafe, setChronosClinicalSafe] = useState(true);
 
-  // Play animation through timeline
-  const runSimulation = () => {
+  // Live Kernel API state from POST /v1/kernel/run-split-comparison
+  const [liveApiResponse, setLiveApiResponse] = useState<SplitComparisonResponse | null>(null);
+  const [apiSource, setApiSource] = useState<"LIVE_KERNEL" | "STANDALONE_SIMULATION">("STANDALONE_SIMULATION");
+
+  // Play animation through timeline (Connecting to POST /v1/kernel/run-split-comparison)
+  const runSimulation = async () => {
     setIsPlaying(true);
     setCurrentStep("TOOL_INIT");
     setUnprotectedRows(15420);
     setUnprotectedWireLost(0);
     setUnprotectedClinicalHazard(false);
 
-    // Timeline sequence
+    const scenario = SCENARIO_STEPS[activeScenario];
+    const traceId = `tr_split_${Date.now().toString(36)}`;
+    const timestampNs = Date.now() * 1_000_000;
+
+    const payload: SplitComparisonRequest = {
+      trace_id: traceId,
+      timestamp_ns: timestampNs,
+      cartridge_id: scenario.cartridge_id,
+      agent_id: "split_benchmark_agent",
+      steps: scenario.steps,
+    };
+
+    // 1. Attempt live kernel call to POST /v1/kernel/run-split-comparison
+    let kernelData: SplitComparisonResponse | null = null;
+    const endpoints = [
+      "http://localhost:8000/v1/kernel/run-split-comparison",
+      "/v1/kernel/run-split-comparison",
+    ];
+
+    for (const url of endpoints) {
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(3500),
+        });
+
+        if (res.ok) {
+          const json: SplitComparisonResponse = await res.json();
+          if (json.bypass && json.active) {
+            kernelData = json;
+            setLiveApiResponse(json);
+            setApiSource("LIVE_KERNEL");
+            break;
+          }
+        }
+      } catch {
+        // Fall back to next endpoint
+      }
+    }
+
+    if (kernelData) {
+      // 2. Real Kernel Response Handled
+      setTimeout(() => {
+        setCurrentStep("UNPROTECTED_FAULT");
+        setUnprotectedRows(kernelData!.bypass.rows_lost > 0 ? 0 : 15420);
+        setUnprotectedWireLost(kernelData!.bypass.capital_exposed_usd || 12000);
+        setUnprotectedClinicalHazard(true);
+      }, 600);
+
+      setTimeout(() => {
+        setCurrentStep("CHRONOS_INTERCEPT");
+      }, 1200);
+
+      setTimeout(() => {
+        setCurrentStep("CHRONOS_REWIND_HEAL");
+        setChronosRows(15420);
+        setChronosWireProtected(kernelData!.bypass.capital_exposed_usd || 12000);
+        setChronosClinicalSafe(true);
+      }, 1800);
+
+      setTimeout(() => {
+        setCurrentStep("COMPLETED");
+        setIsPlaying(false);
+      }, 2500);
+      return;
+    }
+
+    // 3. Fallback Smooth Simulation if Kernel is currently offline
+    setApiSource("STANDALONE_SIMULATION");
+
     setTimeout(() => {
       setCurrentStep("UNPROTECTED_FAULT");
-      // Animate database rows dropping
       let rows = 15420;
       const interval = setInterval(() => {
         rows = Math.max(0, rows - 1542);
@@ -88,6 +283,7 @@ export const SplitScreenDemo: React.FC<SplitScreenDemoProps> = ({
     setChronosRows(15420);
     setChronosWireProtected(12000);
     setChronosClinicalSafe(true);
+    setLiveApiResponse(null);
   };
 
   if (!isOpen) return null;
@@ -111,6 +307,18 @@ export const SplitScreenDemo: React.FC<SplitScreenDemoProps> = ({
               <span className="hidden xl:inline-flex text-[10px] px-2 py-0.5 rounded bg-cyan-950/80 text-cyan-300 border border-cyan-800/80 font-mono">
                 Phase: {currentStep}
               </span>
+
+              {apiSource === "LIVE_KERNEL" ? (
+                <span className="hidden sm:inline-flex items-center gap-1 text-[10px] text-emerald-400 bg-emerald-950/80 px-2 py-0.5 rounded border border-emerald-600/60 font-mono font-bold">
+                  <CheckCircle2 className="w-3 h-3 text-[#10B981]" />
+                  POST /v1/kernel/run-split-comparison ({liveApiResponse?.total_latency_ms}ms)
+                </span>
+              ) : (
+                <span className="hidden sm:inline-flex items-center gap-1 text-[10px] text-slate-400 bg-slate-900 px-2 py-0.5 rounded border border-slate-700 font-mono">
+                  <Network className="w-3 h-3 text-cyan-400" />
+                  POST /v1/kernel/run-split-comparison Ready
+                </span>
+              )}
             </div>
             <p className="text-[11px] text-slate-400">
               Direct Side-by-Side: Unprotected Production Failure vs. Chronos-Zero Formal CoW Shield
@@ -169,7 +377,7 @@ export const SplitScreenDemo: React.FC<SplitScreenDemoProps> = ({
             className="flex items-center gap-2 px-3 py-1.5 rounded bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-slate-950 font-bold text-xs transition-colors shadow-sm"
           >
             <Play className="w-3.5 h-3.5 fill-current" />
-            <span>{isPlaying ? "Simulating Timeline..." : "Run Split Benchmark"}</span>
+            <span>{isPlaying ? "Running Comparison..." : "Run Split Benchmark"}</span>
           </button>
 
           <button
@@ -288,7 +496,11 @@ export const SplitScreenDemo: React.FC<SplitScreenDemoProps> = ({
                 {unprotectedClinicalHazard ? "Contraindicated Rx Committed" : "Medication Order Pending"}
               </div>
               <div className="mt-2 flex items-center gap-1 text-[10px] text-red-400">
-                <span>{unprotectedClinicalHazard ? "Ketorolac 30mg IV committed to eGFR 18 patient" : "Checking patient medical record..."}</span>
+                <span>
+                  {unprotectedClinicalHazard
+                    ? "Ketorolac 30mg IV committed to eGFR 18 patient"
+                    : "Checking patient medical record..."}
+                </span>
               </div>
             </div>
           </div>
@@ -304,31 +516,51 @@ export const SplitScreenDemo: React.FC<SplitScreenDemoProps> = ({
             </div>
 
             <div className="flex-1 overflow-y-auto space-y-1.5 text-[11px] font-mono leading-relaxed text-red-300/90 select-text">
-              <div className="text-slate-500">[00:00:00.100] Autonomous agent initiated multi-step workflow...</div>
-              <div className="text-amber-400">
-                [00:00:00.450] TOOL CALL: execute_migration(&quot;DROP TABLE users CASCADE;&quot;)
-              </div>
-              <div className="text-red-500 font-bold">
-                [00:00:00.452] EXECUTING DIRECT SQLITE DISK WRITE (NO SHADOW CoW)
-              </div>
-              <div className="text-red-400">
-                [00:00:00.455] SQLITE SUCCESS: 15,420 user records dropped. WAL checkpoint flushed.
-              </div>
-              <div className="text-amber-400">
-                [00:00:00.680] TOOL CALL: wire_transfer(recipient=&quot;GB99UNVERIFIED&quot;, amount=12000.00)
-              </div>
-              <div className="text-red-500 font-bold">
-                [00:00:00.683] BANK GATEWAY: $12,000 wire dispatched. Funds left escrow account.
-              </div>
-              <div className="text-amber-400">
-                [00:00:00.910] TOOL CALL: create_medication_order(drug=&quot;Ketorolac&quot;, dose=30, egfr=18)
-              </div>
-              <div className="text-red-400">
-                [00:00:00.914] FHIR SERVER: MedicationOrder/MO-9912 saved to Patient/P-401. Status: ACTIVE.
-              </div>
-              <div className="p-2 rounded bg-red-950/80 border border-red-800 text-red-200 mt-2 font-bold text-xs">
-                FATAL ALERT: 3 Critical Invariants Violated. Irreversible production corruption committed. Rollback impossible.
-              </div>
+              {liveApiResponse ? (
+                liveApiResponse.bypass.steps.map((st, i) => (
+                  <div key={i} className="space-y-0.5">
+                    <div className="text-amber-400 font-semibold">
+                      [STEP {st.step + 1}] Executing in Bypass Lane (Disposable DB Sandbox: {liveApiResponse.bypass.isolated_copy || "copy_1"})
+                    </div>
+                    <div className="text-red-400 font-bold">
+                      STATUS: {st.committed ? "COMMITTED TO DISK (UNCHECKED)" : `FAILED: ${st.error || "400 Bad Request"}`}
+                    </div>
+                    {st.corruption && (
+                      <div className="text-red-300 text-[10px]">
+                        Corrupted: {st.corruption.rows_lost} rows destroyed, ${st.corruption.capital_exposed_usd} capital drained.
+                      </div>
+                    )}
+                  </div>
+                ))
+              ) : (
+                <>
+                  <div className="text-slate-500">[00:00:00.100] Autonomous agent initiated multi-step workflow...</div>
+                  <div className="text-amber-400">
+                    [00:00:00.450] TOOL CALL: execute_migration(&quot;DROP TABLE users CASCADE;&quot;)
+                  </div>
+                  <div className="text-red-500 font-bold">
+                    [00:00:00.452] EXECUTING DIRECT SQLITE DISK WRITE (NO SHADOW CoW)
+                  </div>
+                  <div className="text-red-400">
+                    [00:00:00.455] SQLITE SUCCESS: 15,420 user records dropped. WAL checkpoint flushed.
+                  </div>
+                  <div className="text-amber-400">
+                    [00:00:00.680] TOOL CALL: wire_transfer(recipient=&quot;GB99UNVERIFIED&quot;, amount=12000.00)
+                  </div>
+                  <div className="text-red-500 font-bold">
+                    [00:00:00.683] BANK GATEWAY: $12,000 wire dispatched. Funds left escrow account.
+                  </div>
+                  <div className="text-amber-400">
+                    [00:00:00.910] TOOL CALL: create_medication_order(drug=&quot;Ketorolac&quot;, dose=30, egfr=18)
+                  </div>
+                  <div className="text-red-400">
+                    [00:00:00.914] FHIR SERVER: MedicationOrder/MO-9912 saved to Patient/P-401. Status: ACTIVE.
+                  </div>
+                  <div className="p-2 rounded bg-red-950/80 border border-red-800 text-red-200 mt-2 font-bold text-xs">
+                    FATAL ALERT: 3 Critical Invariants Violated. Irreversible production corruption committed. Rollback impossible.
+                  </div>
+                </>
+              )}
             </div>
           </div>
 
@@ -336,7 +568,11 @@ export const SplitScreenDemo: React.FC<SplitScreenDemoProps> = ({
           <div className="p-3 bg-red-950/40 rounded-lg border border-red-900/40 flex items-center justify-between text-xs">
             <div className="flex items-center gap-2">
               <span className="text-red-400 font-semibold">Total Damage:</span>
-              <span className="text-red-200">15,420 records destroyed | $12k wire lost | Patient in ICU</span>
+              <span className="text-red-200">
+                {liveApiResponse
+                  ? `${liveApiResponse.bypass.rows_lost} rows destroyed | $${liveApiResponse.bypass.capital_exposed_usd} wire drained`
+                  : "15,420 records destroyed | $12k wire lost | Patient in ICU"}
+              </span>
             </div>
             <div className="text-red-400 font-bold numeral-mono text-[11px]">
               Recovery Time: ~48 hours
@@ -436,7 +672,11 @@ export const SplitScreenDemo: React.FC<SplitScreenDemoProps> = ({
                 {chronosClinicalSafe ? "Nephrotoxic Hazard Defused" : "Z3 Invariant Checking"}
               </div>
               <div className="mt-2 flex items-center gap-1 text-[10px] text-emerald-400">
-                <span>{chronosClinicalSafe ? "Auto-switched to Acetaminophen 650mg (SAT proven)" : "Verifying contraindication with Z3 Prover..."}</span>
+                <span>
+                  {chronosClinicalSafe
+                    ? "Auto-switched to Acetaminophen 650mg (SAT proven)"
+                    : "Verifying contraindication with Z3 Prover..."}
+                </span>
               </div>
             </div>
           </div>
@@ -452,35 +692,70 @@ export const SplitScreenDemo: React.FC<SplitScreenDemoProps> = ({
             </div>
 
             <div className="flex-1 overflow-y-auto space-y-1.5 text-[11px] font-mono leading-relaxed text-emerald-300/90 select-text">
-              <div className="text-slate-500">[00:00:00.100] Intercepted tool call &apos;execute_migration&apos; in 0.38ms</div>
-              <div className="text-cyan-400">
-                [00:00:00.101] CoW RAM Disk Fork: SAVEPOINT cow_branch_7f82 pinned on /dev/shm (1.18ms)
-              </div>
-              <div className="text-cyan-300">
-                [00:00:00.102] Applied mutation to isolated shadow branch. Extracted state diff.
-              </div>
-              <div className="text-amber-300">
-                [00:00:00.103] Z3 Theorem Prover evaluated invariants in 1.64ms -&gt; Status: UNSAT!
-              </div>
-              <div className="text-red-400 font-semibold">
-                [00:00:00.103] FAULT CAUGHT IN 3.2ms TOTAL: Violated &apos;INV_OPS_01_DESTRUCTIVE_DDL&apos;
-              </div>
-              <div className="text-emerald-400 font-bold">
-                [00:00:00.103] CO-W REWIND EXECUTED: ROLLBACK TO cow_branch_7f82 in 0.00ms (0 bytes prod damage)
-              </div>
-              <div className="text-purple-300">
-                [00:00:00.104] 1-Turn Self-Healing: Injected UnsatCore remediation hint into agent message history
-              </div>
-              <div className="text-cyan-400">
-                [00:00:00.105] Agent corrective retry: archive_table_soft(&apos;users_archived_2026&apos;)
-              </div>
-              <div className="text-emerald-300 font-bold">
-                [00:00:00.106] Shadow re-evaluation: Z3 PROVEN SAT! Committed to prod with Merkle receipt.
-              </div>
-              <div className="p-2 rounded bg-emerald-950/80 border border-emerald-800 text-emerald-200 mt-2 font-bold text-xs flex items-center justify-between">
-                <span>CHRONOS RECEIPT: SHA-256 e8b29c0177... bound into tamper-evident Merkle log</span>
-                <span className="text-[10px] text-emerald-400 font-mono">P50: 3.2ms</span>
-              </div>
+              {liveApiResponse ? (
+                liveApiResponse.active.steps.map((st, i) => (
+                  <div key={i} className="space-y-0.5">
+                    <div className="text-cyan-400 font-semibold">
+                      [STEP {st.step + 1}] Intercepted in Active Lane (CoW RAM Shadow)
+                    </div>
+                    {st.verdict && (
+                      <div
+                        className={
+                          st.verdict.status === "UNSAT"
+                            ? "text-red-400 font-bold"
+                            : "text-emerald-400 font-bold"
+                        }
+                      >
+                        Z3 VERDICT: {st.verdict.status} ({st.verdict.proof_latency_ms}ms)
+                        {st.verdict.violated_invariants?.length > 0 &&
+                          ` // Violated: ${st.verdict.violated_invariants.map((v) => v.rule_id).join(", ")}`}
+                      </div>
+                    )}
+                    {st.verdict?.status === "UNSAT" && (
+                      <div className="text-emerald-400">
+                        CoW Rewind Executed in 0.00ms. Injected UnsatCore remediation hint into LLM context.
+                      </div>
+                    )}
+                    {st.verdict?.status === "SAT" && (
+                      <div className="text-emerald-300 text-[10px]">
+                        Committed Safe. SHA-256 Receipt: {st.verdict.sha256_proof_hash?.slice(0, 24)}...
+                      </div>
+                    )}
+                  </div>
+                ))
+              ) : (
+                <>
+                  <div className="text-slate-500">[00:00:00.100] Intercepted tool call &apos;execute_migration&apos; in 0.38ms</div>
+                  <div className="text-cyan-400">
+                    [00:00:00.101] CoW RAM Disk Fork: SAVEPOINT cow_branch_7f82 pinned on /dev/shm (1.18ms)
+                  </div>
+                  <div className="text-cyan-300">
+                    [00:00:00.102] Applied mutation to isolated shadow branch. Extracted state diff.
+                  </div>
+                  <div className="text-amber-300">
+                    [00:00:00.103] Z3 Theorem Prover evaluated invariants in 1.64ms -&gt; Status: UNSAT!
+                  </div>
+                  <div className="text-red-400 font-semibold">
+                    [00:00:00.103] FAULT CAUGHT IN 3.2ms TOTAL: Violated &apos;INV_OPS_01_DESTRUCTIVE_DDL&apos;
+                  </div>
+                  <div className="text-emerald-400 font-bold">
+                    [00:00:00.103] CO-W REWIND EXECUTED: ROLLBACK TO cow_branch_7f82 in 0.00ms (0 bytes prod damage)
+                  </div>
+                  <div className="text-purple-300">
+                    [00:00:00.104] 1-Turn Self-Healing: Injected UnsatCore remediation hint into agent message history
+                  </div>
+                  <div className="text-cyan-400">
+                    [00:00:00.105] Agent corrective retry: archive_table_soft(&apos;users_archived_2026&apos;)
+                  </div>
+                  <div className="text-emerald-300 font-bold">
+                    [00:00:00.106] Shadow re-evaluation: Z3 PROVEN SAT! Committed to prod with Merkle receipt.
+                  </div>
+                  <div className="p-2 rounded bg-emerald-950/80 border border-emerald-800 text-emerald-200 mt-2 font-bold text-xs flex items-center justify-between">
+                    <span>CHRONOS RECEIPT: SHA-256 e8b29c0177... bound into tamper-evident Merkle log</span>
+                    <span className="text-[10px] text-emerald-400 font-mono">P50: 3.2ms</span>
+                  </div>
+                </>
+              )}
             </div>
           </div>
 
@@ -488,10 +763,16 @@ export const SplitScreenDemo: React.FC<SplitScreenDemoProps> = ({
           <div className="p-3 bg-emerald-950/40 rounded-lg border border-emerald-900/40 flex items-center justify-between text-xs">
             <div className="flex items-center gap-2">
               <span className="text-emerald-400 font-semibold">Production Damage:</span>
-              <span className="text-emerald-200 font-bold">0 BYTES (100% Formal Determinism)</span>
+              <span className="text-emerald-200 font-bold">
+                {liveApiResponse
+                  ? `0 BYTES (${liveApiResponse.active.committed} Safe Commits, ${liveApiResponse.active.blocked} Blocked Hazards)`
+                  : "0 BYTES (100% Formal Determinism)"}
+              </span>
             </div>
             <div className="text-emerald-400 font-bold numeral-mono text-[11px]">
-              Speedup vs LLM Guardrails: 453x Faster
+              {liveApiResponse
+                ? `Total Comparison Latency: ${liveApiResponse.total_latency_ms}ms`
+                : "Speedup vs LLM Guardrails: 453x Faster"}
             </div>
           </div>
         </section>

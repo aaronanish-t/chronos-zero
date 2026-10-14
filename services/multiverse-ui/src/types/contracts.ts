@@ -144,3 +144,81 @@ export interface AuditLogResponse {
   entries: AuditEntry[];
 }
 
+// ==========================================
+// Kernel Split Comparison (POST /v1/kernel/run-split-comparison)
+// ==========================================
+
+export interface SplitComparisonRequest {
+  trace_id: string;
+  timestamp_ns: number;
+  cartridge_id: CartridgeId;
+  agent_id: string;
+  steps: ToolCall[];
+}
+
+export interface SplitBypassStep {
+  step: number;
+  committed?: boolean;
+  status_code?: number;
+  error?: string;
+  corruption?: {
+    capital_exposed_usd: number;
+    rows_lost: number;
+    changed_fields?: Record<string, { pre: unknown; post: unknown }>;
+  };
+  [key: string]: unknown;
+}
+
+export interface SplitActiveStep {
+  step: number;
+  verdict?: {
+    trace_id: string;
+    shadow_branch_id: string;
+    status: Z3Status;
+    proof_latency_ms: number;
+    violated_invariants: ViolatedInvariant[];
+    smt2_dump: string;
+    sha256_proof_hash: string;
+  };
+  status_code?: number;
+  error?: string;
+  [key: string]: unknown;
+}
+
+export interface SplitBypassResult {
+  isolated_copy?: string;
+  steps: SplitBypassStep[];
+  capital_exposed_usd: number;
+  rows_lost: number;
+}
+
+export interface SplitActiveResult {
+  steps: SplitActiveStep[];
+  blocked: number;
+  committed: number;
+}
+
+export interface SplitComparisonResponse {
+  trace_id: string;
+  cartridge_id: CartridgeId;
+  bypass: SplitBypassResult;
+  active: SplitActiveResult;
+  total_latency_ms: number;
+}
+
+// ==========================================
+// Kernel Reset (POST /v1/kernel/reset)
+// ==========================================
+
+export interface KernelResetResponse {
+  status: string;
+  trace_id: string;
+  reset_latency_ms: number;
+  within_budget: boolean;
+  seed_ms: number;
+  rolled_back_branches: number;
+  sandboxes_dropped: number;
+  archived_audit_chain: string;
+}
+
+
