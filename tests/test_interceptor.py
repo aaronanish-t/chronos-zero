@@ -276,6 +276,30 @@ def test_audit_unavailable_fails_closed(db_dir):
         _assert_failed_closed(db_dir, client, client.post("/v1/kernel/execute", json=payload(*WIRE_400)))
 
 
+def _preflight(client, path, origin):
+    return client.options(path, headers={
+        "Origin": origin,
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "content-type",
+    })
+
+
+@pytest.mark.parametrize("path", ["/v1/kernel/execute", "/v1/kernel/run-split-comparison", "/v1/kernel/reset"])
+def test_cors_allows_the_ui_origin(db_dir, path):
+    with make_client(FakeVerifier()) as client:
+        r = _preflight(client, path, "http://localhost:3000")
+        assert r.status_code == 200
+        assert r.headers["access-control-allow-origin"] == "http://localhost:3000"
+        get = client.get("/v1/kernel/audit-log", headers={"Origin": "http://localhost:3000"})
+        assert get.headers["access-control-allow-origin"] == "http://localhost:3000"
+
+
+def test_cors_rejects_other_origins(db_dir):
+    with make_client(FakeVerifier()) as client:
+        r = _preflight(client, "/v1/kernel/execute", "http://evil.example")
+        assert "access-control-allow-origin" not in r.headers
+
+
 def test_unknown_tool_404(db_dir):
     with make_client(FakeVerifier()) as client:
         r = client.post("/v1/kernel/execute", json=payload("CLOUD_DEVOPS", "rm_rf", "Host/prod", {}))

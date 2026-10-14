@@ -25,6 +25,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Optional
 import httpx
 import psycopg
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from psycopg import errors as pg_errors
 from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, ConfigDict, Field
@@ -55,6 +56,12 @@ MONEY_ARG_KEYS = ("claim_amount_usd", "amount_usd")
 SEEDER_PATH = os.environ.get("CHRONOS_SEEDER_PATH") or str(
     Path(REPO_ROOT) / "services" / "cartridges" / "seed_databases.py"
 )
+# Browser origins allowed to call the kernel (E4's Next.js UI). Comma-separated override.
+CORS_ORIGINS = [
+    o.strip()
+    for o in os.environ.get("CHRONOS_CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+    if o.strip()
+]
 RESET_BUDGET_MS = 300.0
 RESET_DRAIN_TIMEOUT_S = 2.0
 SPLIT_MAX_STEPS = 20
@@ -207,6 +214,7 @@ def create_app(
     pg_dsn: Optional[str] = None,
     audit_dsn: Optional[str] = None,
     seeder_path: str = SEEDER_PATH,
+    cors_origins: Optional[list[str]] = None,
 ) -> FastAPI:
     engine = CoWBranchEngine(pg_dsn)
     hub = TelemetryHub()
@@ -231,6 +239,14 @@ def create_app(
             await audit.close()
 
     app = FastAPI(title="CHRONOS-ZERO Kernel Proxy", version="0.4.0", lifespan=lifespan)
+    # The UI calls the kernel from the browser on another port, so JSON POSTs need a CORS preflight.
+    # Explicit origins only (no "*"): the kernel can commit to production state.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=CORS_ORIGINS if cors_origins is None else cors_origins,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type", "Accept"],
+    )
     app.state.engine = engine
     app.state.hub = hub
     app.state.audit = audit
