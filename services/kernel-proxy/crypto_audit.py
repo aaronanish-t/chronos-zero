@@ -1,19 +1,53 @@
-"""Tamper-evident SHA-256 audit chain for evaluated shadow branches.
+"""Tamper-evident SHA-256 audit chain for evaluated shadow branches, stored in PostgreSQL.
 
 entry_hash = SHA-256(prev_hash | trace_id | smt2_dump | status | timestamp_ns), with fields
 joined by the ASCII unit separator so no two different field splits hash the same.
-The log also carries a Merkle root over all entry hashes, so the UI can show one fingerprint
-for the whole chain.
+timestamp_ns is the Contract 1 timestamp of the intercepted tool call.
+
+The chain lives in its own durable Postgres server (docker-compose `audit-db`, volume-backed),
+so it survives container restarts and is out of reach of agent-supplied SQL, which only ever
+runs inside the (RAM-backed) cartridge databases. Appends are serialized with a transaction-
+scoped advisory lock so concurrent branches cannot fork the chain, and a trigger makes the
+table append-only. The export also carries a Merkle root over all entry hashes.
 """
 
 from __future__ import annotations
 
 import hashlib
+import os
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, Iterable, Optional
+
+from psycopg.rows import dict_row
+from psycopg_pool import AsyncConnectionPool
 
 GENESIS_HASH = "0" * 64
+DEFAULT_AUDIT_DSN = "postgresql://chronos_kernel:chronos_kernel@127.0.0.1:5433/chronos_audit"
 _SEP = "\x1f"
+_APPEND_LOCK_KEY = 0x43485A0  # arbitrary constant: one chain, one writer at a time
+_GETCONN_TIMEOUT_S = 2.0
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS audit_chain (
+    idx              BIGINT PRIMARY KEY,
+    trace_id         TEXT   NOT NULL,
+    shadow_branch_id TEXT   NOT NULL,
+    status           TEXT   NOT NULL,
+    timestamp_ns     BIGINT NOT NULL,
+    smt2_dump        TEXT   NOT NULL,
+    prev_hash        CHAR(64) NOT NULL,
+    entry_hash       CHAR(64) NOT NULL UNIQUE
+);
+CREATE OR REPLACE FUNCTION audit_chain_append_only() RETURNS trigger AS $$
+BEGIN
+    RAISE EXCEPTION 'audit_chain is append-only';
+END
+$$ LANGUAGE plpgsql;
+CREATE OR REPLACE TRIGGER audit_chain_no_update_delete
+    BEFORE UPDATE OR DELETE ON audit_chain FOR EACH ROW EXECUTE FUNCTION audit_chain_append_only();
+CREATE OR REPLACE TRIGGER audit_chain_no_truncate
+    BEFORE TRUNCATE ON audit_chain FOR EACH STATEMENT EXECUTE FUNCTION audit_chain_append_only();
+"""
 
 
 def _sha256(text: str) -> str:
@@ -47,44 +81,99 @@ class AuditEntry:
     entry_hash: str
 
 
+def verify_entries(entries: Iterable[AuditEntry]) -> bool:
+    prev = GENESIS_HASH
+    for position, entry in enumerate(entries):
+        expected = entry_hash(prev, entry.trace_id, entry.smt2_dump, entry.status, entry.timestamp_ns)
+        if entry.index != position or entry.prev_hash != prev or entry.entry_hash != expected:
+            return False
+        prev = entry.entry_hash
+    return True
+
+
+def export_entries(entries: list[AuditEntry]) -> dict[str, Any]:
+    return {
+        "length": len(entries),
+        "genesis_hash": GENESIS_HASH,
+        "head_hash": entries[-1].entry_hash if entries else GENESIS_HASH,
+        "merkle_root": merkle_root([e.entry_hash for e in entries]),
+        "verified": verify_entries(entries),
+        "entries": [asdict(e) for e in entries],
+    }
+
+
+def _entry_from_row(row: dict[str, Any]) -> AuditEntry:
+    return AuditEntry(
+        index=row["idx"],
+        trace_id=row["trace_id"],
+        shadow_branch_id=row["shadow_branch_id"],
+        status=row["status"],
+        timestamp_ns=row["timestamp_ns"],
+        smt2_dump=row["smt2_dump"],
+        prev_hash=row["prev_hash"],
+        entry_hash=row["entry_hash"],
+    )
+
+
 class AuditChain:
-    def __init__(self) -> None:
-        self._entries: list[AuditEntry] = []
-
-    @property
-    def head_hash(self) -> str:
-        return self._entries[-1].entry_hash if self._entries else GENESIS_HASH
-
-    def append(self, trace_id: str, shadow_branch_id: str, smt2_dump: str, status: str, timestamp_ns: int) -> AuditEntry:
-        prev = self.head_hash
-        entry = AuditEntry(
-            index=len(self._entries),
-            trace_id=trace_id,
-            shadow_branch_id=shadow_branch_id,
-            status=status,
-            timestamp_ns=timestamp_ns,
-            smt2_dump=smt2_dump,
-            prev_hash=prev,
-            entry_hash=entry_hash(prev, trace_id, smt2_dump, status, timestamp_ns),
+    def __init__(self, dsn: Optional[str] = None) -> None:
+        self._pool = AsyncConnectionPool(
+            dsn or os.environ.get("CHRONOS_AUDIT_DSN") or DEFAULT_AUDIT_DSN,
+            min_size=1,
+            max_size=4,
+            open=False,
+            kwargs={"row_factory": dict_row},
         )
-        self._entries.append(entry)
+        self._schema_ready = False
+
+    async def open(self) -> None:
+        await self._pool.open(wait=False)
+
+    async def close(self) -> None:
+        await self._pool.close()
+
+    async def _ensure_schema(self) -> None:
+        # Lazy: the kernel may start before Postgres is accepting connections.
+        if self._schema_ready:
+            return
+        async with self._pool.connection(timeout=_GETCONN_TIMEOUT_S) as conn:
+            await conn.execute("SELECT pg_advisory_xact_lock(%s)", (_APPEND_LOCK_KEY,))
+            await conn.execute(_SCHEMA)
+        self._schema_ready = True
+
+    async def append(
+        self, trace_id: str, shadow_branch_id: str, smt2_dump: str, status: str, timestamp_ns: int
+    ) -> AuditEntry:
+        await self._ensure_schema()
+        # pool.connection() commits on success and rolls back on error.
+        async with self._pool.connection(timeout=_GETCONN_TIMEOUT_S) as conn:
+            await conn.execute("SELECT pg_advisory_xact_lock(%s)", (_APPEND_LOCK_KEY,))
+            cur = await conn.execute("SELECT idx, entry_hash FROM audit_chain ORDER BY idx DESC LIMIT 1")
+            head = await cur.fetchone()
+            prev = head["entry_hash"] if head else GENESIS_HASH
+            entry = AuditEntry(
+                index=head["idx"] + 1 if head else 0,
+                trace_id=trace_id,
+                shadow_branch_id=shadow_branch_id,
+                status=status,
+                timestamp_ns=timestamp_ns,
+                smt2_dump=smt2_dump,
+                prev_hash=prev,
+                entry_hash=entry_hash(prev, trace_id, smt2_dump, status, timestamp_ns),
+            )
+            await conn.execute(
+                "INSERT INTO audit_chain (idx, trace_id, shadow_branch_id, status, timestamp_ns, smt2_dump, "
+                "prev_hash, entry_hash) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                (entry.index, entry.trace_id, entry.shadow_branch_id, entry.status, entry.timestamp_ns,
+                 entry.smt2_dump, entry.prev_hash, entry.entry_hash),
+            )
         return entry
 
-    def verify(self) -> bool:
-        prev = GENESIS_HASH
-        for entry in self._entries:
-            expected = entry_hash(prev, entry.trace_id, entry.smt2_dump, entry.status, entry.timestamp_ns)
-            if entry.prev_hash != prev or entry.entry_hash != expected:
-                return False
-            prev = entry.entry_hash
-        return True
+    async def entries(self) -> list[AuditEntry]:
+        await self._ensure_schema()
+        async with self._pool.connection(timeout=_GETCONN_TIMEOUT_S) as conn:
+            cur = await conn.execute("SELECT * FROM audit_chain ORDER BY idx")
+            return [_entry_from_row(row) for row in await cur.fetchall()]
 
-    def export(self) -> dict[str, Any]:
-        return {
-            "length": len(self._entries),
-            "genesis_hash": GENESIS_HASH,
-            "head_hash": self.head_hash,
-            "merkle_root": merkle_root([e.entry_hash for e in self._entries]),
-            "verified": self.verify(),
-            "entries": [asdict(e) for e in self._entries],
-        }
+    async def export(self) -> dict[str, Any]:
+        return export_entries(await self.entries())

@@ -111,6 +111,11 @@ def test_healthcare_self_healing_loop_with_real_z3(db_dir):
         assert ws.receive_json()["node"]["parent_id"] == committed["node"]["id"]
         assert client.app.state.engine.active_branch_count == 0
 
+        log = client.get("/v1/kernel/audit-log").json()
+        assert log["length"] == 3 and log["verified"] is True
+        assert [e["status"] for e in log["entries"]] == ["UNSAT", "SAT", "SAT"]
+        assert {e["timestamp_ns"] for e in log["entries"]} == {rx(**METFORMIN)["timestamp_ns"]}  # Contract 1 time
+
 
 def test_healthcare_state_keys_match_contract_2(db_dir):
     fake = FakeVerifier()
@@ -258,6 +263,16 @@ def test_non_contract_status_fails_closed(db_dir, status):
 def test_verdict_for_another_branch_fails_closed(db_dir):
     fake = FakeVerifier("SAT", mutate=lambda v: v.update(shadow_branch_id="cow_branch_other"))
     with make_client(fake) as client:
+        _assert_failed_closed(db_dir, client, client.post("/v1/kernel/execute", json=payload(*WIRE_400)))
+
+
+def test_audit_unavailable_fails_closed(db_dir):
+    backend_options = {"loop_factory": LOOP_FACTORY} if LOOP_FACTORY else {}
+    app = create_app(
+        transport=httpx.MockTransport(FakeVerifier("SAT")),
+        audit_dsn="postgresql://chronos_kernel:chronos_kernel@127.0.0.1:1/chronos_audit",  # nothing listens here
+    )
+    with TestClient(app, backend_options=backend_options) as client:
         _assert_failed_closed(db_dir, client, client.post("/v1/kernel/execute", json=payload(*WIRE_400)))
 
 

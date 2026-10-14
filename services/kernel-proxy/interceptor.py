@@ -128,23 +128,26 @@ def create_app(
     z3_verify_url: str = Z3_VERIFY_URL,
     transport: Optional[httpx.AsyncBaseTransport] = None,
     pg_dsn: Optional[str] = None,
+    audit_dsn: Optional[str] = None,
 ) -> FastAPI:
     engine = CoWBranchEngine(pg_dsn)
     hub = TelemetryHub()
-    audit = AuditChain()
+    audit = AuditChain(audit_dsn)
     saga = SagaLedger()  # compensation registry for non-SQL external API tools
     last_committed_node: dict[str, str] = {}  # agent_id -> id of the agent's last production change
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # One persistent HTTP client and one Postgres pool per cartridge for the life of the service.
+        # One persistent HTTP client, one Postgres pool per cartridge, and one for the audit chain.
         await engine.open()
+        await audit.open()
         try:
             async with httpx.AsyncClient(timeout=Z3_TIMEOUT_S, transport=transport) as client:
                 app.state.z3_client = client
                 yield
         finally:
             await engine.close()
+            await audit.close()
 
     app = FastAPI(title="CHRONOS-ZERO Kernel Proxy", version="0.2.0", lifespan=lifespan)
     app.state.engine = engine
@@ -216,24 +219,24 @@ def create_app(
         )
 
         verdict: Optional[Z3VerdictResponse] = None
-        verify_error: Optional[Exception] = None
+        failure: Optional[str] = None
         try:
             verdict = await _verify(app.state.z3_client, z3_verify_url, diff)
+            try:
+                # Receipt first: nothing commits without an audit entry.
+                await audit.append(req.trace_id, branch_id, verdict.smt2_dump, verdict.status, req.timestamp_ns)
+            except Exception as exc:
+                failure = f"audit chain append failed: {exc}"
         except Exception as exc:  # fail closed: any verifier problem means no commit
-            verify_error = exc
+            failure = f"Z3 verification failed: {exc}"
         finally:
             # Always resolve, so the pinned connection (and its row locks) is released.
             # A failed COMMIT (e.g. 40001) is rolled back by the engine and surfaces as 409.
-            await _run_engine(engine.resolve(branch_id, verdict is not None and verdict.status == "SAT"))
+            commit = failure is None and verdict is not None and verdict.status == "SAT"
+            await _run_engine(engine.resolve(branch_id, commit))
 
-        if verdict is None:
-            raise HTTPException(
-                status_code=503,
-                detail=f"Z3 verification failed; shadow branch {branch_id} rolled back: {verify_error}",
-            )
-
-        # Kernel-attested time, not the agent-supplied Contract 1 timestamp.
-        audit.append(req.trace_id, branch_id, verdict.smt2_dump, verdict.status, time.time_ns())
+        if failure is not None:
+            raise HTTPException(status_code=503, detail=f"{failure}; shadow branch {branch_id} rolled back")
 
         unsat = verdict.status == "UNSAT"
         node = _node(
@@ -266,7 +269,10 @@ def create_app(
 
     @app.get("/v1/kernel/audit-log")
     async def audit_log() -> dict[str, Any]:
-        return audit.export()
+        try:
+            return await audit.export()
+        except (PoolTimeout, psycopg.Error) as exc:
+            raise HTTPException(status_code=503, detail=f"audit chain unavailable: {exc}") from exc
 
     @app.get("/health")
     async def health() -> dict[str, Any]:

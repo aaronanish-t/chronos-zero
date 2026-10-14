@@ -13,12 +13,13 @@ test-cow:
 
 # RAM-backed PostgreSQL 16 for all cartridge databases (see docker-compose.yml).
 db-up:
-	docker compose up -d --wait postgres
+	docker compose up -d --wait postgres audit-db
 
 db-down:
 	docker compose down
 
 # tmpfs storage: recreating the container wipes every cartridge database.
+# The audit chain lives on the chronos-audit-data volume and is kept.
 db-reset: db-down db-up
 
 db-psql:

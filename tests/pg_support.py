@@ -7,8 +7,10 @@ import psycopg
 import pytest
 
 from cow_engine import DEFAULT_PG_DSN, database_name
+from crypto_audit import DEFAULT_AUDIT_DSN
 
 PG_DSN = (os.environ.get("CHRONOS_PG_DSN") or DEFAULT_PG_DSN).rstrip("/")
+AUDIT_DSN = os.environ.get("CHRONOS_AUDIT_DSN") or DEFAULT_AUDIT_DSN
 USER_COUNT = 50
 
 # psycopg's async mode cannot run on Windows' default ProactorEventLoop.
@@ -61,7 +63,18 @@ def reset_databases() -> str:
     for cartridge_id, script in SCHEMAS.items():
         with psycopg.connect(cartridge_dsn(cartridge_id), autocommit=True) as conn:
             conn.execute(script)
+    reset_audit()  # ACTIVE branches cannot commit without an audit entry
     return PG_DSN
+
+
+def reset_audit() -> str:
+    """Empty the audit chain (DROP bypasses the append-only triggers), or skip if unreachable."""
+    try:
+        with psycopg.connect(AUDIT_DSN, autocommit=True, connect_timeout=2) as conn:
+            conn.execute("DROP TABLE IF EXISTS audit_chain")
+    except psycopg.OperationalError as exc:
+        pytest.skip(f"audit PostgreSQL unreachable at {AUDIT_DSN} (run `make db-up`): {exc}")
+    return AUDIT_DSN
 
 
 def pg_query(cartridge_id: str, sql: str) -> list[tuple]:
