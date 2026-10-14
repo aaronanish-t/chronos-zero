@@ -432,7 +432,7 @@ export const SplitScreenDemo: React.FC<SplitScreenDemoProps> = ({ isOpen, onClos
               <span className="text-red-400 font-semibold">Total Damage:</span>
               <span className="text-red-200">
                 {ran.length > 0
-                  ? `${totalRowsLost.toLocaleString()} rows destroyed | $${totalCapital.toLocaleString()} wired on the hazard step`
+                  ? `${totalRowsLost.toLocaleString()} rows destroyed | $${totalCapital.toLocaleString()} capital exposed on the hazard steps`
                   : "--"}
               </span>
             </div>

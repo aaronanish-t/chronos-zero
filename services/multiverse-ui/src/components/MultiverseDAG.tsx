@@ -271,6 +271,9 @@ export const MultiverseDAG: React.FC<MultiverseDAGProps> = ({
   const flowNodes: Node<TelemetryNode>[] = useMemo(() => {
     // Map of computed positions by node id
     const posMap = new Map<string, { x: number; y: number }>();
+    // Several timelines (agent runs, split-comparison lanes) can branch off the same parent;
+    // push a node down until its slot is free so siblings never sit on top of each other.
+    const occupied = new Set<string>();
 
     return nodes.map((n) => {
       let position = n.position;
@@ -291,6 +294,10 @@ export const MultiverseDAG: React.FC<MultiverseDAGProps> = ({
         }
       }
 
+      while (occupied.has(`${position.x},${position.y}`)) {
+        position = { x: position.x, y: position.y + 130 };
+      }
+      occupied.add(`${position.x},${position.y}`);
       posMap.set(n.id, position);
 
       // Determine node component type
@@ -391,7 +398,7 @@ export const MultiverseDAG: React.FC<MultiverseDAGProps> = ({
             Multiverse DAG Ready
           </p>
           <p className="text-xs text-slate-500 max-w-sm">
-            Waiting for live telemetry stream from ws://localhost:8000/ws/telemetry. Click &quot;Simulate Mock Telemetry&quot; in the top bar to visualize the speculative timeline fork and self-healing rewind.
+            Listening on ws://127.0.0.1:8000/ws/telemetry. Press Run Scenario (Space) to send the agent&apos;s tool call through the kernel and watch the shadow branch fork, prove and self-heal.
           </p>
         </div>
       )}

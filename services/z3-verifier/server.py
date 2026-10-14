@@ -160,4 +160,4 @@ def health() -> Dict[str, Any]:
 if __name__ == "__main__":
     # Loopback only, like the kernel: nothing on the venue network can reach the prover, and
     # Windows does not raise a firewall prompt mid-demo.
-    uvicorn.run(app, host="127.0.0.1", port=8001)
+    uvicorn.run(app, host="127.0.0.1", port=int(os.environ.get("CHRONOS_Z3_PORT", "8001")))

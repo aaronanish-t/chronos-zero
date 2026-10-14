@@ -101,7 +101,7 @@ export const MultiverseCanvas: React.FC<MultiverseCanvasProps> = ({
             Multiverse DAG Ready
           </p>
           <p className="text-xs text-slate-500 max-w-sm">
-            Waiting for live telemetry stream from ws://localhost:8000/ws/telemetry. Click &quot;Simulate Mock Telemetry&quot; in the top bar to run a 60fps speculative branching demo.
+            Listening on ws://127.0.0.1:8000/ws/telemetry. Press Run Scenario (Space) to send the agent&apos;s tool call through the kernel and watch the shadow branch fork, prove and self-heal.
           </p>
         </div>
       )}

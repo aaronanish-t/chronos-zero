@@ -161,5 +161,5 @@ if __name__ == "__main__":
     import uvicorn
 
     # uvicorn picks the Proactor loop on Windows, which async psycopg can't use.
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=8002))
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=int(os.environ.get("CHRONOS_AGENT_PORT", "8002"))))
     asyncio.run(server.serve(), loop_factory=asyncio.SelectorEventLoop)
