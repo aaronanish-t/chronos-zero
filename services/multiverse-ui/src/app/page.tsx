@@ -8,6 +8,8 @@ import { Z3ProofInspector } from "../components/Z3ProofInspector";
 import { LivePolicyStudio } from "../components/LivePolicyStudio";
 import { SplitScreenDemo } from "../components/SplitScreenDemo";
 import { ArchitectureView } from "../components/ArchitectureView";
+import { GlobalNavbar } from "../components/GlobalNavbar";
+import { GlobalFooter } from "../components/GlobalFooter";
 
 function RunStatusStrip({
   runStatus,
@@ -214,6 +216,25 @@ export default function MissionControlPage() {
   const [isSplitDemoOpen, setIsSplitDemoOpen] = useState(false);
   const [currentView, setCurrentView] = useState<"dag" | "architecture">("dag");
 
+  // Sync hash routing (#architecture vs #dag)
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const hash = window.location.hash.replace("#", "");
+      if (hash === "architecture") {
+        setCurrentView("architecture");
+      } else if (hash === "dag") {
+        setCurrentView("dag");
+      }
+    }
+  }, []);
+
+  const handleSelectView = (view: "dag" | "architecture") => {
+    setCurrentView(view);
+    if (typeof window !== "undefined") {
+      window.history.replaceState(null, "", `#${view}`);
+    }
+  };
+
   // Stage Pilot Keyboard Shortcuts:
   // 1 / 2 / 3: Switch to HEALTHCARE_FHIR / FINTECH_ESCROW / CLOUD_DEVOPS
   // Spacebar:  Run the active cartridge's live scenario in the current kernel mode
@@ -266,73 +287,100 @@ export default function MissionControlPage() {
   ]);
 
   return (
-    <main className="flex flex-col h-screen w-screen overflow-hidden bg-surface-container-lowest font-body-md text-body-md text-on-surface antialiased select-none">
-      {/* Top SCADA Telemetry Command Bar */}
-      <TopTelemetryBar
-        status={status}
-        metrics={metrics}
-        activeCartridge={activeCartridge}
-        setActiveCartridge={setActiveCartridge}
-        chronosMode={chronosMode}
-        onToggleChronosMode={toggleChronosMode}
-        isRunning={isRunning}
-        onRun={(cartridge) => runScenario(cartridge, chronosMode)}
-        onRunBypass={(cartridge) => runScenario(cartridge, "BYPASS")}
-        onReset={resetDAG}
-        onOpenSplitDemo={() => setIsSplitDemoOpen(true)}
+    <div className="flex flex-col min-h-screen w-screen overflow-x-hidden bg-surface-container-lowest font-body-md text-body-md text-on-surface antialiased select-none">
+      {/* 1. Global Fixed Top Navbar (Page 1 & Page 2) */}
+      <GlobalNavbar
         currentView={currentView}
-        onSelectView={setCurrentView}
+        onSelectView={handleSelectView}
+        status={status}
+        latencyMs={metrics.latency_ms}
+        onOpenBenchmarks={() => setIsSplitDemoOpen(true)}
+        onOpenDocs={() => {
+          handleSelectView("architecture");
+          setTimeout(() => {
+            document.getElementById("tech-specs")?.scrollIntoView({ behavior: "smooth" });
+          }, 100);
+        }}
+        onOpenSMTProver={() => {
+          if (currentView === "dag") {
+            document.getElementById("policy-input-area")?.focus();
+          } else {
+            handleSelectView("dag");
+          }
+        }}
       />
 
-      {/* Live Run Status Strip */}
-      <RunStatusStrip
-        runStatus={runStatus}
-        activeCartridge={activeCartridge}
-      />
-
-      {/* View Switcher: DAG Mission Control vs Architecture Presentation */}
-      {currentView === "architecture" ? (
-        <ArchitectureView onLaunchConsole={() => setCurrentView("dag")} />
-      ) : (
-        <>
-          {/* Main Workspace Canvas Grid */}
-          <div className="flex flex-1 min-h-0 min-w-0 relative overflow-hidden bg-surface-container-lowest">
-            {/* Left 65%: Multiverse DAG Visualizer */}
-            <MultiverseDAG
-              nodes={nodes}
-              edges={edges}
-              selectedNode={selectedNode}
-              onSelectNode={(node) => {
-                setSelectedNode(node);
-                setIsInspectorOpen(true);
-              }}
-              bypassAlert={bypassActiveAlert}
-              onDismissBypassAlert={dismissBypassAlert}
+      {/* 2. Main Content Area below Navbar */}
+      <main className="relative z-10 w-full pt-16 flex-1 flex flex-col min-h-0">
+        {currentView === "architecture" ? (
+          <div className="flex-1 flex flex-col min-h-0">
+            <ArchitectureView onLaunchConsole={() => handleSelectView("dag")} />
+            <GlobalFooter onOpenReceiptValidator={() => setIsSplitDemoOpen(true)} />
+          </div>
+        ) : (
+          <div className="flex-1 flex flex-col h-[calc(100vh-64px)] overflow-hidden">
+            {/* Top SCADA Telemetry Command Bar */}
+            <TopTelemetryBar
+              status={status}
+              metrics={metrics}
+              activeCartridge={activeCartridge}
+              setActiveCartridge={setActiveCartridge}
+              chronosMode={chronosMode}
+              onToggleChronosMode={toggleChronosMode}
+              isRunning={isRunning}
+              onRun={(cartridge) => runScenario(cartridge, chronosMode)}
+              onRunBypass={(cartridge) => runScenario(cartridge, "BYPASS")}
+              onReset={resetDAG}
+              onOpenSplitDemo={() => setIsSplitDemoOpen(true)}
+              currentView={currentView}
+              onSelectView={handleSelectView}
             />
 
-            {/* Right 35%: Z3 Formal Proof Inspector Drawer */}
-            {isInspectorOpen && (
-              <Z3ProofInspector
-                node={selectedNode}
-                onClose={() => setIsInspectorOpen(false)}
-              />
-            )}
-          </div>
+            {/* Live Run Status Strip */}
+            <RunStatusStrip
+              runStatus={runStatus}
+              activeCartridge={activeCartridge}
+            />
 
-          {/* Docked Live Policy Studio Drawer */}
-          <LivePolicyStudio
-            activeCartridge={activeCartridge}
-            activePolicy={activePolicy}
-            onPolicyCompiled={setActivePolicy}
-          />
-        </>
-      )}
+            {/* Main Workspace Canvas Grid */}
+            <div className="flex flex-1 min-h-0 min-w-0 relative overflow-hidden bg-surface-container-lowest">
+              {/* Left 65%: Multiverse DAG Visualizer */}
+              <MultiverseDAG
+                nodes={nodes}
+                edges={edges}
+                selectedNode={selectedNode}
+                onSelectNode={(node) => {
+                  setSelectedNode(node);
+                  setIsInspectorOpen(true);
+                }}
+                bypassAlert={bypassActiveAlert}
+                onDismissBypassAlert={dismissBypassAlert}
+              />
+
+              {/* Right 35%: Z3 Formal Proof Inspector Drawer */}
+              {isInspectorOpen && (
+                <Z3ProofInspector
+                  node={selectedNode}
+                  onClose={() => setIsInspectorOpen(false)}
+                />
+              )}
+            </div>
+
+            {/* Docked Live Policy Studio Drawer */}
+            <LivePolicyStudio
+              activeCartridge={activeCartridge}
+              activePolicy={activePolicy}
+              onPolicyCompiled={setActivePolicy}
+            />
+          </div>
+        )}
+      </main>
 
       {/* 50/50 Comparative Multiverse Split Screen Modal */}
       <SplitScreenDemo
         isOpen={isSplitDemoOpen}
         onClose={() => setIsSplitDemoOpen(false)}
       />
-    </main>
+    </div>
   );
 }

@@ -146,8 +146,8 @@ export const ArchitectureView: React.FC<ArchitectureViewProps> = ({
           </div>
         </section>
 
-        {/* 2. HERO 3D PERSPECTIVE MOCKUP PRESENTATION */}
-        <section className="relative w-full pt-4 pb-20 overflow-visible">
+        {/* 2. HERO 3D PERSPECTIVE MOCKUP PRESENTATION & TECHNICAL ARCHITECTURE */}
+        <section className="relative w-full pt-4 pb-20 overflow-visible" id="tech-specs">
           {/* Floating Spatial Badges */}
           <div className="hidden lg:flex items-center gap-2 absolute top-12 left-4 z-20 px-3 py-1.5 rounded-lg bg-surface-container-high/90 backdrop-blur-xl shadow-xl -rotate-3 hover:rotate-0 transition-transform cursor-default">
             <span className="material-symbols-outlined text-secondary text-[16px]">
