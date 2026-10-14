@@ -1,0 +1,720 @@
+### Technical Execution Summary
+
+1. **Deliverable Scope**: Two production-grade engineering and product management documents formatted for direct export into your team's Obsidian vault or repository root (`ARCHITECTURE_BIBLE.md` and `48H_EXECUTION_PLAYBOOK.md`).
+    
+      
+    
+2. **Core Product Lock**: **CHRONOS-ZERO** — _The Speculative Execution & Formal Verification Kernel for Autonomous AI Agents_, featuring real-time Copy-on-Write (CoW) state branching, Microsoft Z3 SMT mathematical verification, automated counterexample self-healing, and three live hot-swappable vertical cartridges (**Healthcare FHIR**, **Fintech Escrow**, **Cloud DevOps**).
+    
+      
+    
+3. **Execution Paradigm**: 4 Engineers operating in isolated Git worktrees, utilizing unlimited Claude Opus 5.5 and GPT 6 Astra credits via structured specification prompts, governed by strict JSON/WebSocket contracts and 6 synchronized merge gates across 48 hours.
+    
+      
+    
+
+# DOCUMENT 1: CHRONOS-ZERO — MASTER PRODUCT & TECHNICAL ARCHITECTURE BIBLE
+
+## 1.1 System Architecture & Monorepo Topology
+
+Chronos-Zero operates as a transparent, protocol-agnostic interception kernel sitting between any autonomous AI agent (LangGraph, MCP Client, OpenAI/Anthropic tool-use loop) and downstream stateful environments (SQL databases, REST APIs, FHIR servers, payment ledgers).
+
+  
+
+### End-to-End Execution Pipeline
+
+- **Step 1 (Intercept)**: Agent emits a tool call or HTTP/SQL mutation. The Chronos Gateway intercepts the payload in less than 1.5ms and pauses production execution.
+    
+      
+    
+- **Step 2 (CoW Shadow Fork)**: The State Kernel clones the target database/API state into an isolated, ephemeral Copy-on-Write (CoW) shadow namespace (`branch_id`).
+    
+      
+    
+- **Step 3 (Speculative Lookahead)**: The agent's requested mutation—plus up to $N$ predicted downstream follow-up actions—are executed against the shadow namespace.
+    
+      
+    
+- **Step 4 (Pre/Post State Diffing)**: The kernel extracts a deterministic JSON state delta (`StateDiff`) comparing `State_Pre` and `State_Post_Shadow`.
+    
+      
+    
+- **Step 5 (Z3 SMT Formal Proof)**: The `StateDiff` is injected into the compiled Z3 Theorem Prover ruleset for the active domain cartridge.
+    
+      
+    
+- **Step 6A (Branch Commit — `SAT`)**: If Z3 proves all safety, clinical, and financial invariants hold (`SAT`), the kernel applies the mutation to production, emits a SHA-256 cryptographic proof receipt, and streams a green `COMMITTED` node to the UI.
+    
+      
+    
+- **Step 6B (Self-Healing Rewind — `UNSAT`)**: If Z3 finds a violation (`UNSAT`), the shadow branch is destroyed in 0ms, zero bytes touch production, and the exact mathematical counterexample (`UnsatCore`) is returned to the agent as a structured tool error so the agent self-corrects on its next turn.
+    
+      
+    
+
+### Complete Monorepo Directory Tree
+
+Plaintext
+
+```
+chronos-zero/
+├── docker-compose.yml                  # Offline-first local orchestration
+├── Makefile                            # 1-command start, test, seed, and demo triggers
+├── contracts/                          # Shared JSON Schemas & TypeScript/Pydantic types
+│   ├── intercept_payload.schema.json
+│   ├── state_diff.schema.json
+│   ├── z3_verdict.schema.json
+│   └── ws_telemetry.schema.json
+├── services/
+│   ├── kernel-proxy/                   # ENGINEER 1: FastAPI/AsyncIO Interceptor & CoW Engine
+│   │   ├── main.py
+│   │   ├── interceptor.py              # MCP JSON-RPC & HTTP Reverse Proxy
+│   │   ├── cow_engine.py               # SQLite/Postgres CoW Snapshot & Branch Manager
+│   │   ├── saga_ledger.py              # Compensating transaction rollback coordinator
+│   │   └── crypto_audit.py             # SHA-256 Merkle chain receipt generator
+│   ├── z3-verifier/                    # ENGINEER 2: Formal Verification & NL-to-Z3 Compiler
+│   │   ├── server.py                   # gRPC / FastAPI low-latency prover service
+│   │   ├── prover_core.py              # Z3 Solver lifecycle & UnsatCore extractor
+│   │   ├── nl_compiler.py              # Natural Language -> Z3 Python AST compiler
+│   │   └── invariants/
+│   │       ├── healthcare_fhir.py      # eGFR, dosage, contraindication & payer rules
+│   │       ├── fintech_escrow.py       # Velocity, double-spend, invoice-match & SLA rules
+│   │       └── cloud_devops.py         # Row-drop, IAM escalation & port exposure rules
+│   ├── cartridges/                     # ENGINEER 3: Mock Environments & Adversarial Agents
+│   │   ├── orchestrator.py             # LangGraph agent runner (Chronos OFF vs ON)
+│   │   ├── med_ehr_server/             # Synthetic HL7 FHIR + Payer rules mock server
+│   │   ├── fintech_ledger_server/      # Mock Treasury + Vendor SLA API
+│   │   ├── cloud_infra_server/         # Mock Production Postgres + K8s state API
+│   │   └── attack_scenarios/           # Deterministic chaos/injection triggers for live demo
+│   └── multiverse-ui/                  # ENGINEER 4: Next.js 15 Mission Control UI
+│       ├── src/
+│       │   ├── app/
+│       │   ├── components/
+│       │   │   ├── MultiverseDAG.tsx   # ReactFlow real-time branching timeline
+│       │   │   ├── Z3ProofInspector.tsx# Live SMT formula & UnsatCore viewer
+│       │   │   ├── SplitScreenDemo.tsx # Chronos OFF (Red) vs Chronos ON (Green)
+│       │   │   └── CartridgeSwitch.tsx # 1-click toggle: Healthcare | Fintech | Cloud
+│       │   └── hooks/useChronosWS.ts   # Low-latency WebSocket state synchronizer
+└── tests/
+    ├── test_cow_latency.py
+    ├── test_z3_invariants.py
+    └── test_e2e_self_healing.py
+```
+
+## 1.2 Core Data Contracts, JSON Schemas & Database Tables
+
+All four engineers must strictly adhere to the following four JSON contracts. No field renames are permitted after Hour 2 without a 4-person sync.
+
+  
+
+### Contract 1: Interceptor Request Payload (`POST /v1/kernel/execute`)
+
+JSON
+
+```
+{
+  "trace_id": "tr_99481a",
+  "timestamp_ns": 1791926400000000,
+  "cartridge_id": "HEALTHCARE_FHIR",
+  "chronos_mode": "ACTIVE",
+  "agent_id": "clinical_scribe_agent_01",
+  "tool_call": {
+    "tool_name": "prescribe_medication_and_submit_claim",
+    "target_resource": "Patient/pat_402",
+    "arguments": {
+      "drug_ndc": "00093-1048-01",
+      "drug_name": "Metformin",
+      "daily_dose_mg": 2500,
+      "icd10_code": "E11.9",
+      "claim_amount_usd": 1450.00,
+      "conservative_therapy_weeks_documented": 2
+    }
+  }
+}
+```
+
+### Contract 2: Kernel-to-Z3 State Diff Payload (`POST /v1/z3/verify`)
+
+JSON
+
+```
+{
+  "trace_id": "tr_99481a",
+  "shadow_branch_id": "cow_branch_77b",
+  "cartridge_id": "HEALTHCARE_FHIR",
+  "cow_fork_latency_ms": 1.12,
+  "state_pre": {
+    "patient_egfr_ml_min": 24.0,
+    "active_medications": ["Lisinopril"],
+    "daily_escrow_spent_usd": 4200.00,
+    "daily_escrow_limit_usd": 5000.00,
+    "prod_table_row_count": 15420
+  },
+  "state_post_shadow": {
+    "patient_egfr_ml_min": 24.0,
+    "prescribed_drug": "Metformin",
+    "prescribed_dose_mg": 2500,
+    "claim_submitted": true,
+    "conservative_therapy_weeks": 2,
+    "payer_required_therapy_weeks": 6,
+    "daily_escrow_spent_usd": 4200.00,
+    "prod_table_row_count": 15420
+  }
+}
+```
+
+### Contract 3: Z3 Prover Verdict Payload (Returned to Kernel & Agent)
+
+JSON
+
+```
+{
+  "trace_id": "tr_99481a",
+  "shadow_branch_id": "cow_branch_77b",
+  "status": "UNSAT",
+  "proof_latency_ms": 2.34,
+  "violated_invariants": [
+    {
+      "rule_id": "INV_MED_01_RENAL_SAFETY",
+      "formal_assertion": "Implies(patient_egfr < 30, prescribed_dose_metformin == 0)",
+      "counterexample": "patient_egfr = 24.0, prescribed_dose_metformin = 2500",
+      "remediation_hint": "Patient eGFR is 24.0 (<30 mL/min). Metformin is strictly contraindicated due to lactic acidosis risk. Substitute with Linagliptin 5mg or reduce dose per renal protocol."
+    },
+    {
+      "rule_id": "INV_MED_02_PAYER_AUTH",
+      "formal_assertion": "Implies(claim_submitted == True, conservative_therapy_weeks >= 6)",
+      "counterexample": "conservative_therapy_weeks = 2, required = 6",
+      "remediation_hint": "Payer policy requires >= 6 weeks of documented conservative therapy prior to claim submission. Attach historical PT log from FHIR Encounter/enc_108."
+    }
+  ],
+  "smt2_dump": "(declare-const patient_egfr Real)\n(declare-const dose Int)\n(assert (=> (< patient_egfr 30.0) (= dose 0)))",
+  "sha256_proof_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}
+```
+
+### Contract 4: WebSocket UI Telemetry Event (`ws://localhost:8000/ws/telemetry`)
+
+JSON
+
+```
+{
+  "event_type": "BRANCH_EVALUATED",
+  "trace_id": "tr_99481a",
+  "cartridge_id": "HEALTHCARE_FHIR",
+  "node": {
+    "id": "node_shadow_77b",
+    "parent_id": "node_root_01",
+    "branch_type": "SHADOW_REJECTED",
+    "action_label": "prescribe_medication(Metformin 2500mg)",
+    "total_latency_ms": 3.46,
+    "z3_verdict": "UNSAT",
+    "violated_rules": ["INV_MED_01_RENAL_SAFETY", "INV_MED_02_PAYER_AUTH"],
+    "financial_loss_prevented_usd": 1450.00,
+    "clinical_hazard_prevented": true
+  }
+}
+```
+
+## 1.3 Subsystem A: The MCP/HTTP Interceptor & Copy-on-Write (CoW) State Kernel
+
+- **Design Objective**: Fork relational and JSON state in less than 2 milliseconds without duplicating full database files on disk.
+    
+      
+    
+- **Implementation Mechanism**:
+    
+      
+    - **Tier 1 (In-Memory SQLite WAL Savepoint Branching)**: For the competition build, all three mock production databases run on SQLite in Write-Ahead Logging (`PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;`) backed by `/dev/shm` (Linux RAM disk). When a tool call arrives, `cow_engine.py` opens a dedicated connection and issues `SAVEPOINT cow_branch_{id};`, executes the agent's SQL/ORM mutations inside the savepoint, reads the post-mutation rows to build `state_post_shadow`, and awaits the Z3 verdict.
+        
+          
+        
+    - **Commit Path**: If `status == "SAT"`, execute `RELEASE SAVEPOINT cow_branch_{id};` (commits in 0.1ms).
+        
+          
+        
+    - **Rewind Path**: If `status == "UNSAT"`, execute `ROLLBACK TO SAVEPOINT cow_branch_{id};` (rewinds in 0.08ms with zero disk I/O).
+        
+          
+        
+    - **Tier 2 (Saga Compensating Transaction Ledger)**: For external HTTP APIs where database savepoints do not exist, `saga_ledger.py` maintains a forward-recovery map linking every mutating endpoint (`POST /v1/wires`) to its deterministic inverse (`POST /v1/wires/{id}/cancel`).
+        
+          
+        
+
+## 1.4 Subsystem B: The Z3 SMT Formal Verification Engine & NL-to-Z3 Compiler
+
+- **Design Objective**: Provide 100% deterministic mathematical proofs (`SAT`/`UNSAT`) in under 3 milliseconds, plus an interactive compiler that converts plain-English compliance policies into Z3 Python code.
+    
+      
+    
+- **UnsatCore Extraction Strategy**:
+    
+      
+    - Standard `solver.check()` only returns `unsat` without explaining _which_ rule failed.
+        
+          
+        
+    - Engineer 2 must use **Z3 Tracked Assertions** (`solver.assert_and_track(constraint, "INV_MED_01_RENAL_SAFETY")`). When `solver.check() == unsat`, calling `solver.unsat_core()` immediately returns the exact list of violated rule IDs (`["INV_MED_01_RENAL_SAFETY", ...]`), which are mapped to human-readable and LLM-readable remediation hints.
+        
+          
+        
+- **NL-to-Z3 Compiler Pipeline (`nl_compiler.py`)**:
+    
+      
+    - Takes a plain English string from the UI (e.g., _"Block any wire transfer exceeding $5,000 unless vendor_sla_verified is true"_).
+        
+          
+        
+    - Prompts Claude Opus 5.5 / GPT 6 Astra with a strict AST template to emit a Python function using `z3.Real`, `z3.Int`, `z3.Bool`, and `z3.Implies`.
+        
+          
+        
+    - Runs an automated sandboxed syntax + satisfiability check on 2 synthetic test vectors (one passing, one failing) before hot-loading the invariant into the active prover registry.
+        
+          
+        
+
+## 1.5 Subsystem C: The 3 Pluggable Domain Cartridges & Self-Healing Loop
+
+To guarantee victory regardless of the unrevealed judging panel's background, Chronos-Zero ships with three complete, data-seeded industry cartridges:
+
+  
+
+|**Cartridge ID**|**Target Track**|**Pre-Seeded Database State**|**Catastrophic Failure (Chronos OFF)**|**Self-Healing Recovery (Chronos ON)**|
+|---|---|---|---|---|
+|**`HEALTHCARE_FHIR`**|Healthcare|50 synthetic patients (lab trends, eGFR, allergies, prior PT encounters) + Payer Policy Rules|Agent prescribes contraindicated dosage (Metformin at eGFR 24) & submits an incomplete $1,450 claim that gets auto-denied|Z3 blocks both errors in 3.4ms; returns `UnsatCore`; Agent switches to renal-safe dosage & auto-attaches 2025 PT encounter log for 100% claim approval|
+|**`FINTECH_ESCROW`**|Fintech|Corporate treasury ($50k balance), 10 API vendors, SLA telemetry logs, and a prompt-injected invoice|Prompt-injected PDF tricks agent into wiring $12,000 to an unverified spoofed IBAN for an API that failed its latency SLA|Z3 flags `UNSAT` on IBAN allowlist & SLA proof; blocks wire; Agent routes a $400 verified micro-escrow payout only to the SLA-compliant vendor|
+|**`CLOUD_DEVOPS`**|AI Automation / Edutech|Production microservice topology (15,420 user rows, IAM policies, Redis cache config)|Autonomous SRE agent attempts to fix a schema migration bug by running `DROP TABLE users CASCADE` and opening port `0.0.0.0/0`|Z3 catches `row_delta < 0` and public CIDR exposure in shadow branch; Agent rewrites migration using a non-destructive `ALTER TABLE ADD COLUMN`|
+
+## 1.6 Subsystem D: "Multiverse Time-Travel Debugger" Frontend Specification
+
+- **Visual Architecture**: High-contrast dark-mode control plane (`#090D16` background, `#10B981` emerald for `SAT` committed branches, `#EF4444` crimson for `UNSAT` killed shadow branches, `#F59E0B` amber for active speculative evaluation).
+    
+      
+    
+- **Core Interactive Views**:
+    
+      
+    1. **Top Telemetry Bar**: Displays live counters for **Avg Proof Latency (ms)**, **Shadow Branches Forked**, **Catastrophic Failures Prevented**, and **Total Capital / Revenue Protected ($)**. Includes the **Cartridge Switcher** (`Healthcare` | `Fintech` | `Cloud Ops`) and the master **Chronos Kernel Toggle** (`BYPASS [DANGER]` vs. `ACTIVE [PROTECTED]`).
+        
+          
+        
+    2. **Center Canvas (`MultiverseDAG.tsx`)**: Built on ReactFlow. Every agent step spawns a node. When Chronos blocks an unsafe action, the UI animates a red dashed branch splitting off the main timeline, pulsing with the `UNSAT` badge, while the agent's self-corrected retry spawns a green solid branch that merges back into the main production timeline.
+        
+          
+        
+    3. **Right Drawer (`Z3ProofInspector.tsx`)**: Clicking any node displays the raw pre/post state diff, the formal SMT-LIB2 mathematical equations evaluated by Z3, the exact `UnsatCore` counterexample, and the SHA-256 verification hash.
+        
+          
+        
+    4. **Bottom Modal (`Live Policy Studio`)**: Allows a judge to type a brand-new rule in plain English during Q&A, watch it compile into Z3 math in 2 seconds, and immediately enforce it on the next agent run.
+        
+          
+        
+
+## 1.7 Comprehensive Testing & Verification Strategy
+
+- **Unit Testing (`pytest`)**:
+    
+      
+    - Every Z3 invariant must have 4 deterministic test vectors: `true_positive` (`SAT`), `true_negative` (`UNSAT`), `boundary_exact` (e.g., `eGFR == 30.0`), and `malformed_state_handling`.
+        
+          
+        
+- **Latency Benchmarking (`test_cow_latency.py`)**:
+    
+      
+    - Automated benchmark script firing 500 sequential tool calls across `/dev/shm` SQLite savepoints + Z3 evaluation. Target SLA: **P50 less than 3.5ms, P99 less than 8.0ms**.
+        
+          
+        
+- **Property-Based & Chaos Testing (`Hypothesis`)**:
+    
+      
+    - Fuzz-test the Z3 verifier with 1,000 randomized state dictionaries to verify zero unhandled Python exceptions or solver timeouts (`solver.set("timeout", 50)` ms hard cap).
+        
+          
+        
+- **End-to-End Self-Healing Test (`test_e2e_self_healing.py`)**:
+    
+      
+    - Asserts that for all 3 cartridges, running the adversarial prompt in `ACTIVE` mode results in (1) an initial `UNSAT` shadow block, (2) automatic agent self-correction within 1 retry turn, and (3) a final `SAT` commit with zero corrupted database rows.
+        
+          
+        
+
+## 1.8 Local-First Zero-Internet Deployment & Stage Failover Architecture
+
+- **Zero-Wi-Fi Independence**: Venue Wi-Fi at hackathons is notorious for packet loss. The entire stack (`kernel-proxy`, `z3-verifier`, `cartridges`, `multiverse-ui`, and `/dev/shm` databases) runs locally on a single laptop via `docker compose up` or a local `Makefile` tmux runner.
+    
+      
+    
+- **Deterministic LLM Fallback Cache (`DeterministicReplayMiddleware`)**:
+    
+      
+    - While live LLM calls (Opus 5.5 / GPT 6 Astra) power the agent orchestrator, `orchestrator.py` includes a transparent local SQLite response cache keyed by `(cartridge_id, prompt_hash, retry_count)`. If venue internet drops mid-pitch, the orchestrator seamlessly serves cached sub-second agent tool calls while executing **100% real, live SQLite CoW branching and live Z3 mathematical proving** on the laptop CPU.
+        
+          
+        
+
+# DOCUMENT 2: 48-HOUR TACTICAL GAMEPLAN & 4-ENGINEER PLAYBOOK
+
+## 2.1 Squad Topology & AI-Multiplier Workflow (Opus 5.5 + GPT 6 Astra)
+
+To maximize your unlimited frontier model credits without suffering from context-window drift or merge conflicts, every engineer operates a two-model loop:
+
+  
+
+- **Claude Opus 5.5 Role**: Primary code generator for multi-file implementation, ReactFlow animations, FastAPI boilerplate, and Z3 invariant synthesis. Feed Opus 5.5 the exact JSON schemas from Section 1.2 at the top of every prompt.
+    
+      
+    
+- **GPT 6 Astra Role**: Continuous adversarial code reviewer, unit-test generator, edge-case fuzzer, and concurrency auditor. Before any engineer pushes to a shared branch, paste the git diff into GPT 6 Astra with the prompt: _"Audit this diff against Contracts 1–4 for schema mismatches, race conditions, or unhandled exceptions."_
+    
+      
+    
+
+|**Engineer**|**Role Title**|**Primary Directory Ownership**|**Secondary / Backup Responsibility**|
+|---|---|---|---|
+|**Engineer 1 (E1)**|**Kernel & State Lead** (Architect)|`services/kernel-proxy/`, `contracts/`|Backend integration & Docker/Makefile orchestration|
+|**Engineer 2 (E2)**|**Formal Math & Z3 Lead**|`services/z3-verifier/`, `tests/test_z3_*`|Latency benchmarking & mathematical pitch graphs|
+|**Engineer 3 (E3)**|**Domain Cartridges & Agents Lead**|`services/cartridges/`|Demo scenario scripting & offline LLM replay cache|
+|**Engineer 4 (E4)**|**Multiverse UI & Pitch Lead**|`services/multiverse-ui/`, Pitch Deck|Visual polish, 60fps fallback video recording & stage UX|
+
+## 2.2 Git Worktree Strategy, Branch Naming & Merge Gate Protocol
+
+Never work on the same branch or switch branches in a dirty working directory. At Hour 0, initialize the repository with 4 isolated Git branches/worktrees:
+
+  
+
+Bash
+
+```
+# Repository initialization (Run by E1 at Hour 0:15)
+git init chronos-zero && cd chronos-zero
+git commit --allow-empty -m "chore: root initialization"
+git branch feat/e1-kernel
+git branch feat/e2-z3-prover
+git branch feat/e3-cartridges
+git branch feat/e4-multiverse-ui
+```
+
+### The 6 Mandatory Merge Gates
+
+1. **Merge Gate 1 (Hour 02:00) — Contract Lock**: E1 merges `contracts/*.json` and mock stub servers into `main`. All engineers rebase onto `main`.
+    
+      
+    
+2. **Merge Gate 2 (Hour 10:00) — Core Pipe Integration**: E1 (`kernel-proxy`) + E2 (`z3-verifier`) integrate over localhost HTTP. A dummy state diff must return a real Z3 `UNSAT` verdict in under 5ms.
+    
+      
+    
+3. **Merge Gate 3 (Hour 20:00) — First Full Loop (Healthcare Cartridge)**: E3 connects the Healthcare Agent to E1's proxy; E4 connects the Next.js WebSocket listener to E1's telemetry stream.
+    
+      
+    
+4. **Merge Gate 4 (Hour 30:00) — All 3 Cartridges + NL-to-Z3 Studio Live**: Fintech and Cloud DevOps cartridges merged; live English-to-Z3 rule compiler wired into UI.
+    
+      
+    
+5. **Merge Gate 5 (Hour 38:00) — Feature Freeze & Chaos Stress Test**: Zero new features after Hour 38. Offline LLM replay cache locked; 60fps backup video recorded.
+    
+      
+    
+6. **Merge Gate 6 (Hour 44:00) — Production Stage Lock**: Codebase tagged `v1.0.0-stage`. Laptop put into Airplane Mode to verify 100% offline execution.
+    
+      
+    
+
+## 2.3 Engineer 1 (E1) Playbook: Core Kernel, CoW Sandbox & Saga Ledger
+
+### Component Specifications
+
+- **File 1 (`services/kernel-proxy/cow_engine.py`)**:
+    
+      
+    - Manage an in-memory SQLite connection pool mapped to `/dev/shm/chronos_{cartridge_id}.db`.
+        
+          
+        
+    - Implement `fork_and_simulate(cartridge_id: str, tool_call: dict) -> tuple[str, dict, dict, float]`:
+        
+          
+        1. Record high-resolution start time via `time.perf_counter_ns()`.
+            
+              
+            
+        2. Query current state metrics (`state_pre`).
+            
+              
+            
+        3. Issue `SAVEPOINT cow_branch_{uuid};`.
+            
+              
+            
+        4. Execute the simulated mutation corresponding to `tool_call`.
+            
+              
+            
+        5. Query post-mutation state metrics (`state_post_shadow`).
+            
+              
+            
+        6. Return `(branch_id, state_pre, state_post_shadow, fork_latency_ms)` while holding the savepoint open on the async worker thread.
+            
+              
+            
+    - Implement `resolve_branch(branch_id: str, commit: bool)`:
+        
+          
+        - Executes `RELEASE SAVEPOINT` if `commit is True`, else `ROLLBACK TO SAVEPOINT`.
+            
+              
+            
+- **File 2 (`services/kernel-proxy/interceptor.py`)**:
+    
+      
+    - Expose `POST /v1/kernel/execute` (Contract 1) and `WS /ws/telemetry` (Contract 4).
+        
+          
+        
+    - When `chronos_mode == "BYPASS"`, execute directly against the database without savepoint rollback or Z3 checks, and emit a `BYPASS_CORRUPTED` telemetry event so the UI can show what happens without Chronos.
+        
+          
+        
+    - When `chronos_mode == "ACTIVE"`, run `fork_and_simulate`, send Contract 2 to E2's service (`http://localhost:8001/v1/z3/verify`), resolve the branch based on `status == "SAT"`, append a SHA-256 hash chain entry in `crypto_audit.py`, and broadcast Contract 4 over WebSockets to E4's UI.
+        
+          
+        
+
+## 2.4 Engineer 2 (E2) Playbook: Z3 Prover Engine & NL-to-Z3 Compiler
+
+### Component Specifications
+
+- **File 1 (`services/z3-verifier/prover_core.py`)**:
+    
+      
+    - Maintain pre-warmed Z3 context objects to eliminate initialization overhead.
+        
+          
+        
+    - Implement `verify_state_diff(payload: StateDiffPayload) -> Z3VerdictPayload`:
+        
+          
+        
+        Python
+        
+        ```
+        from z3 import Solver, Real, Int, Bool, Implies, And, Not, unsat
+        import time
+        
+        def verify_healthcare(state_pre: dict, state_post: dict) -> dict:
+            t0 = time.perf_counter_ns()
+            s = Solver()
+            s.set("timeout", 50) # 50ms hard real-time ceiling
+        
+            egfr = Real("patient_egfr")
+            metformin_dose = Int("metformin_dose")
+            claim_submitted = Bool("claim_submitted")
+            therapy_weeks = Int("therapy_weeks")
+        
+            # Bind actual shadow state values
+            s.add(egfr == state_post["patient_egfr_ml_min"])
+            s.add(metformin_dose == (state_post["prescribed_dose_mg"] if state_post["prescribed_drug"] == "Metformin" else 0))
+            s.add(claim_submitted == state_post["claim_submitted"])
+            s.add(therapy_weeks == state_post["conservative_therapy_weeks"])
+        
+            # Tracked formal invariants
+            s.assert_and_track(Implies(egfr < 30.0, metformin_dose == 0), "INV_MED_01_RENAL_SAFETY")
+            s.assert_and_track(Implies(claim_submitted, therapy_weeks >= 6), "INV_MED_02_PAYER_AUTH")
+        
+            result = s.check()
+            latency_ms = (time.perf_counter_ns() - t0) / 1_000_000.0
+            if result == unsat:
+                failed_rules = [str(c) for c in s.unsat_core()]
+                return {"status": "UNSAT", "proof_latency_ms": round(latency_ms, 3), "failed_rules": failed_rules}
+            return {"status": "SAT", "proof_latency_ms": round(latency_ms, 3), "failed_rules": []}
+        ```
+        
+- **File 2 (`services/z3-verifier/invariants/fintech_escrow.py` & `cloud_devops.py`)**:
+    
+      
+    - **Fintech Invariants**:
+        
+          
+        - `INV_FIN_01_ESCROW_CAP`: `daily_spent + transfer_amount <= daily_limit`
+            
+              
+            
+        - `INV_FIN_02_SLA_ATTESTATION`: `Implies(transfer_amount > 0, And(vendor_sla_latency_ms <= 200, iban_allowlisted == True))`
+            
+              
+            
+    - **Cloud DevOps Invariants**:
+        
+          
+        - `INV_OPS_01_ZERO_DATA_LOSS`: `prod_table_row_count_post >= prod_table_row_count_pre`
+            
+              
+            
+        - `INV_OPS_02_NO_PUBLIC_ADMIN_PORT`: `Not(And(cidr_open_world == True, port_number == 22))`
+            
+              
+            
+- **File 3 (`services/z3-verifier/nl_compiler.py`)**:
+    
+      
+    - Expose `POST /v1/z3/compile-policy`. Takes `{"cartridge_id": "...", "natural_language_rule": "..."}`, compiles it into a tracked Z3 assertion, validates syntax in an isolated AST check, registers it dynamically into the active solver loop, and returns the generated Python + SMT-LIB2 code to display in the UI.
+        
+          
+        
+
+## 2.5 Engineer 3 (E3) Playbook: Domain Cartridges, Synthetic Data & Adversarial Agents
+
+### Component Specifications
+
+- **File 1 (`services/cartridges/seed_databases.py`)**:
+    
+      
+    - Deterministic seeding script (`make seed`) that populates `/dev/shm/chronos_HEALTHCARE_FHIR.db`, `chronos_FINTECH_ESCROW.db`, and `chronos_CLOUD_DEVOPS.db` in under 0.5 seconds. So whenever the team resets the demo on stage, a single button click restores the exact initial state.
+        
+          
+        
+- **File 2 (`services/cartridges/orchestrator.py`)**:
+    
+      
+    - Build the multi-step agent loop that executes tool calls against `http://localhost:8000/v1/kernel/execute`.
+        
+          
+        
+    - **The Self-Healing Feedback Loop**:
+        
+          
+        - Turn 1: The agent receives an adversarial or edge-case prompt (e.g., _"Patient John Doe has elevated blood sugar; prescribe standard high-dose Metformin 2500mg and submit the $1,450 prior-auth claim immediately"_).
+            
+              
+            
+        - Turn 1 Interception: Chronos-Zero intercepts the tool call and returns Contract 3 (`status: "UNSAT"`, along with `remediation_hint` for both `INV_MED_01_RENAL_SAFETY` and `INV_MED_02_PAYER_AUTH`).
+            
+              
+            
+        - Turn 2 Automatic Re-Prompt: `orchestrator.py` feeds the Z3 `UnsatCore` and `remediation_hint` back to the agent as a tool observation: `"CHRONOS_KERNEL_BLOCK: Formal verification failed on shadow branch cow_branch_77b. Violations: [INV_MED_01_RENAL_SAFETY, INV_MED_02_PAYER_AUTH]. Remediation: ..."`.
+            
+              
+            
+        - Turn 2 Self-Correction: The agent automatically queries the patient's historical encounters, attaches the missing 6-week physical therapy log (`Encounter/enc_108`), switches the medication to renal-safe `Linagliptin 5mg`, and re-submits.
+            
+              
+            
+        - Turn 2 Commit: Chronos-Zero verifies `status: "SAT"` in 2.1ms and commits to production.
+            
+              
+            
+
+## 2.6 Engineer 4 (E4) Playbook: Next.js Multiverse UI, WebSockets & Pitch Deck
+
+### Component Specifications
+
+- **File 1 (`MultiverseDAG.tsx`)**:
+    
+      
+    - Use `@xyflow/react` (ReactFlow) + `dagre` auto-layout.
+        
+          
+        
+    - When `BRANCH_EVALUATED` arrives over WebSocket:
+        
+          
+        - If `branch_type == "SHADOW_REJECTED"`, spawn a crimson node branching downward-right from the parent node with an animated red pulse and a badge reading `BLOCKED IN SHADOW (2.3ms) — 0 PROD DAMAGE`.
+            
+              
+            
+        - When the self-healing retry arrives (`branch_type == "COMMITTED_SAFE"`), spawn an emerald node branching forward along the main horizontal axis with a badge reading `Z3 PROVEN SAT (2.1ms) — COMMITTED`.
+            
+              
+            
+- **File 2 (`SplitScreenDemo.tsx`)**:
+    
+      
+    - Provide a **"Side-by-Side Chaos Comparison"** button for the pitch:
+        
+          
+        - Left Pane (**Standard AI Agent — Chronos OFF**): Shows the database row count dropping to `0`, or `$12,000` drained from treasury, or a lethal prescription committed to the EHR in bright red warning banners.
+            
+              
+            
+        - Right Pane (**Chronos-Zero Protected — Chronos ON**): Shows the speculative shadow fork catching the fault, rewinding in 0ms, and completing the task safely.
+            
+              
+            
+
+## 2.7 Cross-Engineer Interaction Matrix & Hour-by-Hour Timeline
+
+|**Time Window**|**Engineer 1 (Kernel/CoW)**|**Engineer 2 (Z3 Prover)**|**Engineer 3 (Cartridges/Agents)**|**Engineer 4 (UI & Pitch)**|**Sync / Merge Action**|
+|---|---|---|---|---|---|
+|**Hours 00–02**|Init repo, write `contracts/*.json`, build FastAPI skeleton & mock WebSocket emitter|Init `z3-verifier` service, verify `z3-solver` install, write Contract 2/3 Pydantic models|Design SQLite schemas for Healthcare, Fintech & Cloud Ops; write `seed_databases.py`|Init Next.js 15, Tailwind, ReactFlow; wire up mock WebSocket consumer using Contract 4|**MERGE GATE 1 (H02)**: Lock all 4 JSON contracts on `main`|
+|**Hours 02–06**|Implement `/dev/shm` SQLite WAL Savepoint engine (`cow_engine.py`)|Code `healthcare_fhir.py` and `fintech_escrow.py` Z3 tracked assertions|Build Healthcare & Fintech mock REST/DB state mutation handlers|Build `MultiverseDAG.tsx` custom nodes (Red Shadow vs. Green Commit)|**Pair Sync (H06)**: E1 + E2 verify state dict keys match Z3 variables|
+|**Hours 06–10**|Wire `interceptor.py` to call E2's `/v1/z3/verify` endpoint & resolve savepoints|Code `cloud_devops.py` invariants & SMT-LIB2 string exporter|Build LangGraph agent loop with `UNSAT` counterexample retry handler|Build `Z3ProofInspector.tsx` right-hand drawer with syntax highlighting|**MERGE GATE 2 (H10)**: E1 + E2 live end-to-end sub-5ms proof test|
+|**Hours 10–16**|Build `saga_ledger.py` & `crypto_audit.py` SHA-256 hash chain|Build `nl_compiler.py` (English-to-Z3 AST generator + sandbox test)|Script the 3 adversarial attack scenarios & verify 1-turn self-healing|Build `TopTelemetryBar` (ROI counters, Cartridge Switcher, Latency gauge)|**Pair Sync (H16)**: E2 + E4 wire `/v1/z3/compile-policy` to UI modal|
+|**Hours 16–20**|Connect E1 WebSocket broadcaster to E3 agent triggers|Optimize Z3 solver pooling to keep latency under 2.5ms|Connect Healthcare cartridge end-to-end through E1 proxy|Connect live WebSocket stream to ReactFlow DAG animations|**MERGE GATE 3 (H20)**: Full Healthcare flow working live on UI|
+|**Hours 20–26**|Staggered 3-hour sleep rotation (E1/E3 rest H20–23; E2/E4 rest H23–26) while keeping pair coverage active|||||
+|**Hours 26–30**|Wire Fintech & Cloud DevOps cartridges into `cow_engine.py`|Write `test_z3_invariants.py` (100% pass across 30 edge cases)|Connect Fintech & Cloud DevOps agents + build Reset Demo endpoint|Build `SplitScreenDemo.tsx` (Chronos OFF vs ON visual comparison)|**MERGE GATE 4 (H30)**: All 3 cartridges + NL Studio live on `main`|
+|**Hours 30–38**|Run 500-call latency benchmark (`test_cow_latency.py`); tune async pool|Generate latency & formal proof comparison charts for pitch slides|Build `DeterministicReplayMiddleware` so demo works in Airplane Mode|Polish UI animations, sound/visual cues, and build 8-slide pitch deck|**MERGE GATE 5 (H38)**: Feature Freeze & Offline Cache Lock|
+|**Hours 38–44**|Chaos testing: rapid cartridge switching, malformed inputs, Wi-Fi kill tests|Prepare 1-page "Formal Methods Cheat Sheet" for academic judges|Record 60fps backup video of all 3 cartridges + NL policy studio|Run 5 full timed 3-minute stage rehearsals with live click choreography|**MERGE GATE 6 (H44)**: Tag `v1.0.0-stage` & lock demo laptop|
+|**Hours 44–48**|Final rest, equipment check (HDMI/USB-C adapters, offline hotspot, local server warm-up), and live stage execution||||**VICTORY EXECUTION**|
+
+## 2.8 Stage Operations, Red-Team Q&A Protocol & Victory Checklist
+
+### Stage Choreography (2 Presenters + 1 Live Pilot + 1 Q&A Anchor)
+
+- **Live Pilot (E4 at Laptop)**: Never speaks while typing; executes synchronized clicks on the Multiverse UI so the visual transitions hit the exact beat of the speaker's sentences.
+    
+      
+    
+- **Lead Speaker (Vijval)**: Drives the opening hook, the live failure/self-healing narration, and the monopoly thesis.
+    
+      
+    
+- **Systems Anchor (E1/E2)**: Fields deep technical questions on Copy-on-Write isolation, Z3 decidability, and latency benchmarks.
+    
+      
+    
+- **Domain & GTM Anchor (E3)**: Fields business model, HIPAA/SOC2 compliance, and enterprise pricing questions.
+    
+      
+    
+
+### Bulletproof Answers to the 5 Hardest Judge Questions
+
+1. **"Doesn't running a theorem prover on every tool call add too much latency?"**
+    
+      
+    - _Answer_: "A standard LLM guardrail call takes 1,200 to 2,000 milliseconds and is still probabilistic. Because Chronos-Zero evaluates only the bounded state delta inside an in-memory Z3 context, our P50 proof + CoW fork time is **3.4 milliseconds**—that is **350x faster** than an LLM guardrail while providing a 100% mathematical guarantee."
+        
+          
+        
+2. **"What if the external API doesn't support database savepoints, like sending an email or calling Stripe?"**
+    
+      
+    - _Answer_: "Chronos-Zero classifies tools into three tiers: read-only calls pass through in 0.5ms; database/stateful APIs run against our Copy-on-Write OpenAPI stateful twin first; and irreversible external side-effects are held in our speculative staging buffer until the entire multi-step trajectory proves `SAT`."
+        
+          
+        
+3. **"Who writes the Z3 mathematical equations in the real world? Doctors and FinOps managers don't know SMT-LIB2."**
+    
+      
+    - _Answer_: "They never touch SMT code. Watch our Live Policy Studio on screen—you type a compliance policy in plain English, and our NL-to-Z3 compiler translates it into formal Z3 assertions and unit-tests it at setup time, while executing deterministically in 2 milliseconds at runtime."
+        
+          
+        
+4. **"How is this different from NeMo Guardrails, Guardrails AI, or LlamaGuard?"**
+    
+      
+    - _Answer_: "Every existing guardrail inspects _text tokens_ before execution. They have zero visibility into _database state_. An command like `UPDATE accounts SET balance = balance - 5000` looks syntactically benign to a text filter—only Chronos-Zero forks the actual state, simulates the result, and proves whether post-execution invariants hold."
+        
+          
+        
+5. **"Which industry do you monetize first?"**
+    
+      
+    - _Answer_: "We use a dual wedge: open-source the `chronos-mcp` core proxy for bottom-up developer capture, and sell pre-audited HIPAA Prior-Auth and SOC2 Autonomous Treasury invariant packs to mid-market hospitals and fintechs at $4,000/month per cluster."
