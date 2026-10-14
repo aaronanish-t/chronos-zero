@@ -7,6 +7,7 @@ otherwise ROLLBACK. The connection returns to the pool only after COMMIT/ROLLBAC
 """
 import os
 import re
+import logging
 import time
 import uuid
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ POOL_MAX_SIZE = 24
 POOL_GETCONN_TIMEOUT_S = 2.0
 SANDBOX_PREFIX = "bypass_"
 _SANDBOX_NAME = re.compile(r"^bypass_[0-9a-f]{12}$")
+LOGGER = logging.getLogger(__name__)
 
 # Handlers receive the full Contract 1 tool_call: {"tool_name", "target_resource", "arguments"}.
 StateReader = Callable[[AsyncConnection, dict[str, Any]], Awaitable[dict[str, Any]]]
@@ -43,8 +45,8 @@ async def _rollback_and_return(pool: AsyncConnectionPool, conn: AsyncConnection)
     """
     try:
         await conn.rollback()
-    except Exception:
-        pass
+    except Exception as exc:
+        LOGGER.debug("rollback failed before returning connection to pool: %s", exc)
     finally:
         await pool.putconn(conn)
 
@@ -128,8 +130,8 @@ class CoWBranchEngine:
         except BaseException:
             try:
                 await conn.rollback()  # e.g. 40001 on COMMIT: the branch is rejected
-            except Exception:
-                pass  # surface the original error; putconn() below discards a broken connection
+            except Exception as rollback_exc:
+                LOGGER.debug("rollback after failed commit did not complete: %s", rollback_exc)
             raise
         finally:
             # Returned only after COMMIT/ROLLBACK, never mid-transaction.
@@ -168,8 +170,8 @@ class CoWBranchEngine:
         except BaseException:
             try:
                 await conn.rollback()
-            except Exception:
-                pass
+            except Exception as rollback_exc:
+                LOGGER.debug("direct mutation rollback did not complete: %s", rollback_exc)
             raise
         finally:
             await pool.putconn(conn)
@@ -182,9 +184,9 @@ class CoWBranchEngine:
             try:
                 await self.resolve(branch_id, commit=False)
             except KeyError:
-                pass  # resolved concurrently
-            except Exception:
-                pass  # resolve() already returned the connection; keep releasing the rest
+                LOGGER.debug("branch %s was resolved concurrently", branch_id)
+            except Exception as exc:
+                LOGGER.debug("branch %s cleanup failed after resolve: %s", branch_id, exc)
         return len(branch_ids)
 
     async def create_disposable_copy(self, cartridge_id: str) -> str:

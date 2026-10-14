@@ -10,13 +10,16 @@ import os
 import re
 import sys
 import threading
+import uuid
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI
 from pydantic import BaseModel, Field
 import uvicorn
+import httpx
 
 # Ensure repository root is on sys.path
 REPO_ROOT = str(Path(__file__).resolve().parents[2])
@@ -33,6 +36,7 @@ from contracts.schemas import (  # noqa: E402
 )
 from prover_core import (  # noqa: E402
     dispatch_verification,
+    fail_closed_verdict,
     get_solver_metrics,
     prewarm_solvers,
 )
@@ -45,6 +49,11 @@ _Z3_LOCK = threading.Lock()
 
 # Contract 3 rule_id pattern (contracts/z3_verdict.schema.json); compiled rules end up there.
 RULE_ID_PATTERN = re.compile(r"^INV_[A-Z]+_[0-9]{2}_[A-Z0-9_]+$")
+LOGGER = logging.getLogger(__name__)
+KERNEL_POLICY_EVENT_URL = os.environ.get(
+    "CHRONOS_KERNEL_POLICY_EVENT_URL",
+    "http://127.0.0.1:8000/v1/kernel/telemetry/policy-compiled",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -99,10 +108,9 @@ def verify_state(payload: StateDiffRequest) -> Z3VerdictResponse:
         with _Z3_LOCK:
             return dispatch_verification(payload)
     except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Z3 verification internal error: {str(e)}",
-        )
+        # Contract 3 is fail-closed: an unexpected verifier failure is still
+        # a real, tracked UNSAT proof rather than an untyped HTTP error.
+        return fail_closed_verdict(payload, e)
 
 
 @app.post(
@@ -119,7 +127,9 @@ def compile_policy(payload: PolicyCompileRequest) -> PolicyCompileResponse:
                 rule_id=payload.rule_id,
                 natural_language_rule=payload.natural_language_rule,
             )
-        return PolicyCompileResponse(**result)
+        response = PolicyCompileResponse(**result)
+        _notify_policy_compiled(response)
+        return response
     except Exception as e:
         return PolicyCompileResponse(
             status="ERROR",
@@ -128,6 +138,38 @@ def compile_policy(payload: PolicyCompileRequest) -> PolicyCompileResponse:
             formal_assertion="",
             message=f"Failed to compile policy: {str(e)}",
         )
+
+
+def _notify_policy_compiled(result: PolicyCompileResponse) -> None:
+    """Forward the Contract 4 policy event to the kernel's single telemetry hub.
+
+    Compilation remains successful when the kernel is not running (for example
+    during an isolated verifier unit test); the event is best-effort and is
+    delivered to the live stage hub when the full stack is up.
+    """
+    event = {
+        "event_type": "POLICY_COMPILED",
+        "trace_id": f"tr_policy_{uuid.uuid4().hex[:12]}",
+        "cartridge_id": result.cartridge_id,
+        "node": {
+            "id": f"policy_{result.rule_id}",
+            "parent_id": "node_root",
+            "branch_type": "SYSTEM_EVENT",
+            "action_label": f"POLICY_COMPILED({result.rule_id})",
+            "total_latency_ms": float(result.compilation_latency_ms or 0.0),
+            "z3_verdict": "N/A",
+            "violated_rules": [],
+            "financial_loss_prevented_usd": 0.0,
+            "clinical_hazard_prevented": False,
+        },
+    }
+    try:
+        with httpx.Client(timeout=0.25) as client:
+            client.post(KERNEL_POLICY_EVENT_URL, json=event).raise_for_status()
+    except httpx.HTTPError as exc:
+        # The verifier is independently useful; a missing kernel only means
+        # there is no UI stream to receive this optional event yet.
+        LOGGER.debug("kernel policy telemetry unavailable: %s", exc)
 
 
 @app.post(

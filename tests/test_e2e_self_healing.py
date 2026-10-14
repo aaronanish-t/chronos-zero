@@ -42,7 +42,10 @@ def run(cartridge_id, mode):
         async with httpx.AsyncClient(transport=httpx.MockTransport(fake_kernel)) as client:
             return await orchestrator.ChronosAgentRunner(cartridge_id, mode, client=client).run()
     # psycopg async can't use Windows' default Proactor loop.
-    return asyncio.run(go(), loop_factory=asyncio.SelectorEventLoop)
+    if sys.platform == "win32":
+        with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
+            return runner.run(go())
+    return asyncio.run(go())
 
 
 @pytest.fixture

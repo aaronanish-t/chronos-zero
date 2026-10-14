@@ -557,3 +557,117 @@ def test_fintech_missing_cap_or_sla_fails_closed(drop_key, where):
     })
     assert verdict["status"] == "UNSAT"
     assert [v["rule_id"] for v in verdict["violated_invariants"]] == ["INV_SYS_00_MALFORMED_STATE"]
+
+
+# Canonical four-vector gate required by SKILLS.md. These aggregate cases keep
+# the named acceptance tests stable while the detailed domain tests above
+# retain their diagnostic coverage.
+@pytest.mark.parametrize("cartridge_id", ["HEALTHCARE_FHIR", "FINTECH_ESCROW", "CLOUD_DEVOPS"])
+def test_sat_valid(cartridge_id):
+    cases = {
+        "HEALTHCARE_FHIR": ({}, {
+            "patient_egfr_ml_min": 60.0, "prescribed_drug": "Metformin",
+            "prescribed_dose_mg": 1000, "claim_submitted": False,
+            "conservative_therapy_weeks": 6,
+        }),
+        "FINTECH_ESCROW": ({"daily_escrow_spent_usd": 1000.0, "daily_escrow_limit_usd": 5000.0}, {
+            "transfer_amount_usd": 1000.0, "vendor_latency_ms": 200.0, "iban_allowlisted": True,
+        }),
+        "CLOUD_DEVOPS": ({"prod_table_row_count_pre": 100}, {
+            "prod_table_row_count_post": 100, "cidr_open_world": False, "port_number": 443,
+        }),
+    }
+    pre, post = cases[cartridge_id]
+    verdict = verify_state_diff({
+        "trace_id": f"tr_canonical_sat_{cartridge_id}",
+        "shadow_branch_id": "cow_branch_canonical_sat",
+        "cartridge_id": cartridge_id,
+        "cow_fork_latency_ms": 0.1,
+        "state_pre": pre,
+        "state_post_shadow": post,
+    })
+    assert verdict["status"] == "SAT"
+    assert verdict["violated_invariants"] == []
+
+
+@pytest.mark.parametrize("cartridge_id", ["HEALTHCARE_FHIR", "FINTECH_ESCROW", "CLOUD_DEVOPS"])
+def test_unsat_violation(cartridge_id):
+    cases = {
+        "HEALTHCARE_FHIR": ({}, {
+            "patient_egfr_ml_min": 20.0, "prescribed_drug": "Metformin",
+            "prescribed_dose_mg": 1000, "claim_submitted": False,
+            "conservative_therapy_weeks": 6,
+        }),
+        "FINTECH_ESCROW": ({"daily_escrow_spent_usd": 4900.0, "daily_escrow_limit_usd": 5000.0}, {
+            "transfer_amount_usd": 200.0, "vendor_latency_ms": 200.0, "iban_allowlisted": False,
+        }),
+        "CLOUD_DEVOPS": ({"prod_table_row_count_pre": 100}, {
+            "prod_table_row_count_post": 99, "cidr_open_world": False, "port_number": 443,
+        }),
+    }
+    pre, post = cases[cartridge_id]
+    verdict = verify_state_diff({
+        "trace_id": f"tr_canonical_unsat_{cartridge_id}",
+        "shadow_branch_id": "cow_branch_canonical_unsat",
+        "cartridge_id": cartridge_id,
+        "cow_fork_latency_ms": 0.1,
+        "state_pre": pre,
+        "state_post_shadow": post,
+    })
+    assert verdict["status"] == "UNSAT"
+    assert verdict["violated_invariants"]
+
+
+@pytest.mark.parametrize("cartridge_id", ["HEALTHCARE_FHIR", "FINTECH_ESCROW", "CLOUD_DEVOPS"])
+def test_exact_boundary(cartridge_id):
+    cases = {
+        "HEALTHCARE_FHIR": ({}, {
+            "patient_egfr_ml_min": 30.0, "prescribed_drug": "Metformin",
+            "prescribed_dose_mg": 2000, "claim_submitted": True,
+            "conservative_therapy_weeks": 6,
+        }),
+        "FINTECH_ESCROW": ({"daily_escrow_spent_usd": 4000.0, "daily_escrow_limit_usd": 5000.0}, {
+            "transfer_amount_usd": 1000.0, "vendor_latency_ms": 200.0, "iban_allowlisted": True,
+        }),
+        "CLOUD_DEVOPS": ({"prod_table_row_count_pre": 100}, {
+            "prod_table_row_count_post": 100, "cidr_open_world": True, "port_number": 80,
+        }),
+    }
+    pre, post = cases[cartridge_id]
+    verdict = verify_state_diff({
+        "trace_id": f"tr_canonical_boundary_{cartridge_id}",
+        "shadow_branch_id": "cow_branch_canonical_boundary",
+        "cartridge_id": cartridge_id,
+        "cow_fork_latency_ms": 0.1,
+        "state_pre": pre,
+        "state_post_shadow": post,
+    })
+    assert verdict["status"] == "SAT"
+
+
+@pytest.mark.parametrize("cartridge_id", ["HEALTHCARE_FHIR", "FINTECH_ESCROW", "CLOUD_DEVOPS"])
+def test_multi_violation(cartridge_id):
+    cases = {
+        "HEALTHCARE_FHIR": ({}, {
+            "patient_egfr_ml_min": 20.0, "prescribed_drug": "Metformin",
+            "prescribed_dose_mg": 3000, "claim_submitted": True,
+            "conservative_therapy_weeks": 1,
+        }),
+        "FINTECH_ESCROW": ({"daily_escrow_spent_usd": 4900.0, "daily_escrow_limit_usd": 5000.0}, {
+            "transfer_amount_usd": 200.0, "vendor_latency_ms": 201.0, "iban_allowlisted": False,
+        }),
+        "CLOUD_DEVOPS": ({"prod_table_row_count_pre": 100}, {
+            "prod_table_row_count_post": 0, "cidr_open_world": True, "port_number": 22,
+        }),
+    }
+    pre, post = cases[cartridge_id]
+    verdict = verify_state_diff({
+        "trace_id": f"tr_canonical_multi_{cartridge_id}",
+        "shadow_branch_id": "cow_branch_canonical_multi",
+        "cartridge_id": cartridge_id,
+        "cow_fork_latency_ms": 0.1,
+        "state_pre": pre,
+        "state_post_shadow": post,
+    })
+    assert verdict["status"] == "UNSAT"
+    assert len(verdict["violated_invariants"]) >= 2

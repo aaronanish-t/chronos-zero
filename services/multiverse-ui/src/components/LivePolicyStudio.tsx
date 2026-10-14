@@ -54,7 +54,9 @@ export const LivePolicyStudio: React.FC<LivePolicyStudioProps> = ({
   activePolicy,
   onPolicyCompiled,
 }) => {
-  const [isExpanded, setIsExpanded] = useState(true);
+  // Keep the main DAG presentation calm by default; the full compiler remains
+  // one click away for the policy portion of the pitch.
+  const [isExpanded, setIsExpanded] = useState(false);
   const [customRule, setCustomRule] = useState("");
   const [activeTab, setActiveTab] = useState<"PYTHON_Z3" | "SMT2" | "HINT">("PYTHON_Z3");
   const [isCompiling, setIsCompiling] = useState(false);
@@ -128,7 +130,7 @@ export const LivePolicyStudio: React.FC<LivePolicyStudioProps> = ({
   ];
 
   return (
-    <footer className="w-full bg-[#090D16] border-t border-[#1E293B] select-none text-slate-300 font-mono shrink-0">
+    <footer className="w-full bg-[#0B1120] border-t border-[#24324A] select-none text-slate-300 font-mono shrink-0 shadow-[0_-12px_32px_rgba(0,0,0,0.16)]">
       {/* Studio Header bar */}
       <div className="flex items-center justify-between px-4 py-2 bg-[#0F172A]/90 border-b border-[#1E293B]/70">
         <div className="flex items-center gap-2.5">
@@ -168,7 +170,7 @@ export const LivePolicyStudio: React.FC<LivePolicyStudioProps> = ({
 
       {/* Expandable Studio Body */}
       {isExpanded && (
-        <div className="p-3 bg-[#090D16]/95 grid grid-cols-1 lg:grid-cols-12 gap-3 text-xs">
+        <div className="p-3 bg-[#0B1120]/95 grid grid-cols-1 lg:grid-cols-12 gap-3 text-xs max-h-[31vh] overflow-y-auto">
           {/* Left Column: Natural Language Input & Judge Q&A Quick Chips */}
           <div className="lg:col-span-7 space-y-2.5">
             <div className="flex items-center justify-between">

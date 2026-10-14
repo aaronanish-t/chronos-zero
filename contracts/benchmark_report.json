@@ -1,17 +1,17 @@
 {
-  "generated_at": "2026-10-14T08:10:46+00:00",
+  "generated_at": "2026-10-14T18:17:56+00:00",
   "environment": {
-    "platform": "Windows 11",
-    "python": "3.14.3",
-    "postgres": "16.4",
+    "platform": "Linux 7.2.9-2-cachyos",
+    "python": "3.11.2",
+    "postgres": "15.19 (Debian 15.19-0+deb12u1)",
     "z3": "5.1.0",
     "z3_mode": "untimed: real prover_core verdict on a worker thread, excluded from all timings",
     "db_roundtrip_ms": {
-      "min": 0.865,
-      "p50": 1.41,
-      "p90": 1.998,
-      "p99": 2.814,
-      "max": 3.647
+      "min": 0.046,
+      "p50": 0.054,
+      "p90": 0.129,
+      "p99": 0.261,
+      "max": 0.292
     },
     "unit": "ms"
   },
@@ -19,33 +19,35 @@
     "sequential": {
       "cycles": 500,
       "cartridges": [
-        "HEALTHCARE_FHIR"
+        "HEALTHCARE_FHIR",
+        "FINTECH_ESCROW",
+        "CLOUD_DEVOPS"
       ],
       "verdicts": {
-        "SAT": 250,
-        "UNSAT": 250
+        "SAT": 249,
+        "UNSAT": 251
       },
       "phases": {
         "fork_ms": {
-          "min": 4.188,
-          "p50": 6.223,
-          "p90": 10.14,
-          "p99": 14.159,
-          "max": 16.032
+          "min": 0.634,
+          "p50": 1.578,
+          "p90": 2.048,
+          "p99": 2.487,
+          "max": 2.632
         },
         "resolve_ms": {
-          "min": 0.807,
-          "p50": 1.768,
-          "p90": 3.206,
-          "p99": 4.319,
-          "max": 4.873
+          "min": 0.092,
+          "p50": 0.286,
+          "p90": 0.474,
+          "p99": 0.599,
+          "max": 0.675
         },
         "total_ms": {
-          "min": 5.166,
-          "p50": 8.09,
-          "p90": 12.9,
-          "p99": 18.312,
-          "max": 19.535
+          "min": 0.918,
+          "p50": 1.897,
+          "p90": 2.442,
+          "p99": 2.891,
+          "max": 3.045
         }
       }
     },
@@ -60,25 +62,25 @@
       },
       "phases": {
         "fork_ms": {
-          "min": 39.418,
-          "p50": 208.072,
-          "p90": 358.751,
-          "p99": 392.462,
-          "max": 392.462
+          "min": 11.835,
+          "p50": 72.29,
+          "p90": 140.33,
+          "p99": 148.535,
+          "max": 148.535
         },
         "resolve_ms": {
-          "min": 1.556,
-          "p50": 4.391,
-          "p90": 6.594,
-          "p99": 17.201,
-          "max": 17.201
+          "min": 0.137,
+          "p50": 0.809,
+          "p90": 1.735,
+          "p99": 2.254,
+          "max": 2.254
         },
         "total_ms": {
-          "min": 41.905,
-          "p50": 213.94,
-          "p90": 360.908,
-          "p99": 397.026,
-          "max": 397.026
+          "min": 12.743,
+          "p50": 73.921,
+          "p90": 140.649,
+          "p99": 148.921,
+          "max": 148.921
         }
       }
     }
@@ -87,8 +89,8 @@
     "applies_to": "sequential.total_ms",
     "p50_limit_ms": 3.5,
     "p99_limit_ms": 8.0,
-    "p50_ms": 8.09,
-    "p99_ms": 18.312,
-    "passed": false
+    "p50_ms": 1.897,
+    "p99_ms": 2.891,
+    "passed": true
   }
 }

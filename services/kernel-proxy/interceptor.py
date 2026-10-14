@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import logging
 import os
 import sys
 import time
@@ -65,6 +66,7 @@ CORS_ORIGINS = [
 RESET_BUDGET_MS = 300.0
 RESET_DRAIN_TIMEOUT_S = 2.0
 SPLIT_MAX_STEPS = 20
+LOGGER = logging.getLogger(__name__)
 
 
 class TelemetryHub:
@@ -123,8 +125,8 @@ class StageGate:
             try:
                 try:
                     await asyncio.wait_for(self._idle.wait(), RESET_DRAIN_TIMEOUT_S)
-                except asyncio.TimeoutError:
-                    pass  # stragglers' pinned branches are rolled back by the reset itself
+                except asyncio.TimeoutError as exc:
+                    LOGGER.debug("reset drain timed out; pinned branches will be rolled back: %s", exc)
                 yield
             finally:
                 self.resetting = False
@@ -376,6 +378,14 @@ def create_app(
                 return await _execute_bypass(req, timeline=req.agent_id)
             return (await _execute_active(req, timeline=req.agent_id)).model_dump(mode="json")
 
+    @app.post("/v1/kernel/telemetry/policy-compiled")
+    async def policy_compiled(event: TelemetryEvent) -> dict[str, str]:
+        """Receive a verifier policy event and fan it out on the sole UI stream."""
+        if event.event_type != "POLICY_COMPILED":
+            raise HTTPException(status_code=400, detail="event_type must be POLICY_COMPILED")
+        await hub.broadcast(event)
+        return {"status": "BROADCAST", "event_type": event.event_type}
+
     @app.post("/v1/kernel/run-split-comparison")
     async def run_split_comparison(req: SplitComparisonRequest) -> dict[str, Any]:
         """Run the same steps through BYPASS and ACTIVE at the same time for the stage split screen.
@@ -506,7 +516,7 @@ def create_app(
             while True:
                 await ws.receive_text()
         except WebSocketDisconnect:
-            pass
+            return
         finally:
             hub.disconnect(ws)
 

@@ -9,6 +9,7 @@ compiled policies into the active prover loop for immediate enforcement.
 from __future__ import annotations
 
 import ast
+import logging
 import os
 import re
 import time
@@ -31,6 +32,8 @@ from z3 import (
     sat,
     unsat,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Cartridge Schemas, Variables, and Synthetic Test Vectors
@@ -197,12 +200,10 @@ DYNAMIC_POLICY_REGISTRY = DYNAMIC_RULES
 
 class ASTSafetyViolation(ValueError):
     """Raised when an expression contains unauthorized AST nodes, calls, or attribute access."""
-    pass
 
 
 class PolicyCompilationError(ValueError):
     """Raised when a natural language rule cannot be compiled or verified."""
-    pass
 
 
 ALLOWED_Z3_FUNCTIONS: Set[str] = {
@@ -380,7 +381,7 @@ def evaluate_synthetic_vectors(
     # 1. Mathematical satisfiability check (reject contradictions)
     s_sat = Solver()
     s_sat.set("timeout", 50)
-    s_sat.add(z3_expr)
+    s_sat.assert_and_track(z3_expr, f"{rule_id}_SYNTHETIC_SAT")
     if s_sat.check() == unsat:
         raise PolicyCompilationError(
             f"Rule '{rule_id}' is inherently unsatisfiable (logical contradiction): {formal_str}"
@@ -390,7 +391,7 @@ def evaluate_synthetic_vectors(
     # 2. Mathematical violation check (reject tautologies)
     s_unsat = Solver()
     s_unsat.set("timeout", 50)
-    s_unsat.add(Not(z3_expr))
+    s_unsat.assert_and_track(Not(z3_expr), f"{rule_id}_SYNTHETIC_UNSAT")
     if s_unsat.check() == unsat:
         raise PolicyCompilationError(
             f"Rule '{rule_id}' is a tautology (cannot be violated): {formal_str}"
@@ -566,8 +567,8 @@ def _call_llm_api(prompt: str) -> Optional[str]:
                     text = re.sub(r"^```(?:python)?\s*", "", text)
                     text = re.sub(r"\s*```$", "", text).strip()
                     return text
-        except Exception:
-            pass
+        except Exception as exc:
+            LOGGER.debug("Anthropic policy compilation attempt failed: %s", exc)
 
     openai_key = os.environ.get("OPENAI_API_KEY")
     if openai_key:
@@ -590,8 +591,8 @@ def _call_llm_api(prompt: str) -> Optional[str]:
                     text = re.sub(r"^```(?:python)?\s*", "", text)
                     text = re.sub(r"\s*```$", "", text).strip()
                     return text
-        except Exception:
-            pass
+        except Exception as exc:
+            LOGGER.debug("OpenAI policy compilation attempt failed: %s", exc)
 
     return None
 
@@ -682,12 +683,12 @@ def _generate_z3_expression(cartridge_id: str, nl_text: str) -> str:
     """Generate pure Python Z3 constraint expression using direct parsing, LLM, or deterministic synthesis."""
     cleaned = nl_text.strip()
 
-    # 1. Direct pass-through if already valid Z3 expression
+    # 1. Direct expression if already valid Z3 expression
     try:
         validate_ast_safety(cleaned, cartridge_id)
         return cleaned
-    except Exception:
-        pass
+    except Exception as exc:
+        LOGGER.debug("policy is not a direct Z3 expression: %s", exc)
 
     # 2. External LLM translation if configured
     prompt = format_llm_prompt(cartridge_id, cleaned)
@@ -696,8 +697,8 @@ def _generate_z3_expression(cartridge_id: str, nl_text: str) -> str:
         try:
             validate_ast_safety(llm_resp, cartridge_id)
             return llm_resp
-        except Exception:
-            pass
+        except Exception as exc:
+            LOGGER.debug("LLM policy expression rejected by AST sandbox: %s", exc)
 
     # 3. Deterministic pattern synthesis
     synthesized = _synthesize_pattern_expression(cartridge_id, cleaned)

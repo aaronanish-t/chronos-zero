@@ -152,7 +152,10 @@ def evaluate_cloud_devops_invariants(
 
     except Exception as e:
         status = "UNSAT"
-        smt2_str = ""
+        fail_closed_solver = Solver()
+        fail_closed_solver.set("timeout", SOLVER_TIMEOUT_MS)
+        fail_closed_solver.assert_and_track(BoolVal(False), "INV_SYS_00_MALFORMED_STATE")
+        smt2_str = fail_closed_solver.to_smt2()
         violated.append({
             "rule_id": "INV_SYS_00_MALFORMED_STATE",
             "formal_assertion": "valid_state_delta",

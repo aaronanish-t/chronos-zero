@@ -84,4 +84,7 @@ def pg_query(cartridge_id: str, sql: str) -> list[tuple]:
 
 
 def run(coro):
-    return asyncio.run(coro, loop_factory=LOOP_FACTORY)
+    if LOOP_FACTORY is None:
+        return asyncio.run(coro)
+    with asyncio.Runner(loop_factory=LOOP_FACTORY) as runner:
+        return runner.run(coro)

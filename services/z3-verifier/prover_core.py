@@ -13,7 +13,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Union
-from z3 import Solver, unknown, unsat
+from z3 import BoolVal, Solver, unknown, unsat
 
 # Ensure repo root is in sys.path so contracts.schemas can be imported anywhere
 REPO_ROOT = str(Path(__file__).resolve().parents[2])
@@ -41,6 +41,34 @@ RULE_REGISTRIES: Dict[str, Dict[str, Dict[str, str]]] = {
 # Metrics tracking for /health endpoint
 _TOTAL_PROOFS = 0
 _TOTAL_PROOF_LATENCY_MS = 0.0
+_PREWARM_FAILURES: list[str] = []
+
+
+def fail_closed_verdict(req: StateDiffRequest, error: Exception) -> Z3VerdictResponse:
+    """Create a valid Contract 3 UNSAT response for an unexpected prover failure."""
+    t0 = time.perf_counter_ns()
+    solver = Solver()
+    solver.set("timeout", 50)
+    solver.assert_and_track(BoolVal(False), MALFORMED_RULE_ID)
+    smt2_dump = solver.to_smt2()
+    proof_latency_ms = round((time.perf_counter_ns() - t0) / 1_000_000.0, 3)
+    global _TOTAL_PROOFS, _TOTAL_PROOF_LATENCY_MS
+    _TOTAL_PROOFS += 1
+    _TOTAL_PROOF_LATENCY_MS += proof_latency_ms
+    return Z3VerdictResponse(
+        trace_id=req.trace_id,
+        shadow_branch_id=req.shadow_branch_id,
+        status="UNSAT",
+        proof_latency_ms=proof_latency_ms,
+        violated_invariants=[ViolatedInvariant(
+            rule_id=MALFORMED_RULE_ID,
+            formal_assertion="valid_state_delta",
+            counterexample=f"Prover failed closed: {error}",
+            remediation_hint="Retry with a valid state delta after the verifier is healthy.",
+        )],
+        smt2_dump=smt2_dump,
+        sha256_proof_hash=hashlib.sha256(smt2_dump.encode("utf-8")).hexdigest(),
+    )
 
 
 def get_solver_metrics() -> Dict[str, Any]:
@@ -55,6 +83,7 @@ def get_solver_metrics() -> Dict[str, Any]:
         "average_proof_latency_ms": avg_latency,
         "total_verifications": _TOTAL_PROOFS,
         "supported_cartridges": list(RULE_REGISTRIES.keys()),
+        "prewarm_failures": list(_PREWARM_FAILURES),
     }
 
 
@@ -87,8 +116,8 @@ def prewarm_solvers() -> None:
                 },
             )
             dispatch_verification(req)
-        except Exception:
-            pass
+        except Exception as exc:
+            _PREWARM_FAILURES.append(f"{cartridge}: {type(exc).__name__}: {exc}")
 
 
 def dispatch_verification(
@@ -221,7 +250,12 @@ def dispatch_verification(
 
     except Exception as e:
         status = "UNSAT"
-        smt2_dump = ""
+        # Even malformed state receives a real, tracked SMT-LIB2 fail-closed
+        # receipt. An empty string is not a proof artifact.
+        fail_closed_solver = Solver()
+        fail_closed_solver.set("timeout", 50)
+        fail_closed_solver.assert_and_track(BoolVal(False), MALFORMED_RULE_ID)
+        smt2_dump = fail_closed_solver.to_smt2()
         violated_list.append(
             ViolatedInvariant(
                 rule_id=MALFORMED_RULE_ID,

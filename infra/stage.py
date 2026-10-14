@@ -44,8 +44,9 @@ def main() -> int:
            "CHRONOS_Z3_URL": f"http://127.0.0.1:{Z3}/v1/z3/verify",
            "CHRONOS_KERNEL_URL": f"http://127.0.0.1:{KERNEL}",
            "CHRONOS_CORS_ORIGINS": f"http://localhost:{UI},http://127.0.0.1:{UI}",
-           "CHRONOS_KERNEL_HTTP": f"http://127.0.0.1:{KERNEL}",
-           "CHRONOS_Z3_HTTP": f"http://127.0.0.1:{Z3}",
+            "CHRONOS_KERNEL_HTTP": f"http://127.0.0.1:{KERNEL}",
+            "CHRONOS_KERNEL_POLICY_EVENT_URL": f"http://127.0.0.1:{KERNEL}/v1/kernel/telemetry/policy-compiled",
+            "CHRONOS_Z3_HTTP": f"http://127.0.0.1:{Z3}",
            "CHRONOS_AGENT_HTTP": f"http://127.0.0.1:{AGENT}",
            "NEXT_PUBLIC_CHRONOS_WS_URL": f"ws://127.0.0.1:{KERNEL}/ws/telemetry"}
     try:

@@ -217,7 +217,7 @@ export const RootOriginNode = memo(function RootOriginNode({
 
       <div className="text-[9px] text-slate-500 font-mono flex items-center gap-1">
         <FileCode2 className="w-2.5 h-2.5" />
-        <span>Chronos In-Memory RAM CoW Initialized</span>
+        <span>PostgreSQL RAM-backed CoW initialized</span>
       </div>
 
       {/* Source Handle (Right) */}
@@ -265,7 +265,7 @@ export const MultiverseDAG: React.FC<MultiverseDAGProps> = ({
   /**
    * Deterministic Multiverse Layout Reducer:
    * - Root node at (80, 220).
-   * - SHADOW_REJECTED branches downward-right to (parent.x + 320, parent.y + 150).
+    * - SHADOW_REJECTED branches downward-right to (parent.x + 320, parent.y + 120).
    * - COMMITTED_SAFE branches horizontally to (parent.x + 320, parent.y).
    */
   const flowNodes: Node<TelemetryNode>[] = useMemo(() => {
@@ -284,8 +284,8 @@ export const MultiverseDAG: React.FC<MultiverseDAGProps> = ({
         position = { x: 80, y: 220 };
       } else if (parentPos) {
         if (branchType === "SHADOW_REJECTED") {
-          // Branch downward-right to (parent.x + 320, parent.y + 150)
-          position = { x: parentPos.x + 320, y: parentPos.y + 150 };
+          // Branch downward-right to (parent.x + 320, parent.y + 120)
+          position = { x: parentPos.x + 320, y: parentPos.y + 120 };
         } else if (branchType === "COMMITTED_SAFE") {
           // Branch horizontally from parent to (parent.x + 320, parent.y)
           position = { x: parentPos.x + 320, y: parentPos.y };

@@ -102,7 +102,7 @@ export default function MissionControlPage() {
   }, [activeCartridge, chronosMode, isRunning, resetDAG, runScenario, setActiveCartridge]);
 
   return (
-    <main className="flex flex-col h-screen w-screen overflow-hidden bg-[#090D16]">
+    <main className="flex flex-col h-screen w-screen overflow-hidden bg-[#090D16] bg-[radial-gradient(circle_at_70%_-20%,rgba(14,116,144,0.14),transparent_42%),#090D16]">
       {/* Panel 1: Top Telemetry Bar */}
       <TopTelemetryBar
         status={status}
@@ -120,7 +120,7 @@ export default function MissionControlPage() {
       <RunStatusStrip runStatus={runStatus} />
 
       {/* Center Layout: ReactFlow Canvas (Panel 2) + Right Z3 Proof Drawer (Panel 3) */}
-      <div className="flex flex-1 min-h-0 relative overflow-hidden">
+      <div className="flex flex-1 min-h-0 min-w-0 relative overflow-hidden">
         <MultiverseDAG
           nodes={nodes}
           edges={edges}
