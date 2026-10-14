@@ -51,7 +51,13 @@ class PolicyCompileResponse(BaseModel):
     cartridge_id: str
     rule_id: str
     formal_assertion: str
+    compiled_code: Optional[str] = None
+    z3_code: Optional[str] = None
+    smt2_dump: Optional[str] = None
     smt2_template: Optional[str] = None
+    compilation_latency_ms: Optional[float] = None
+    latency_ms: Optional[float] = None
+    remediation_hint: Optional[str] = None
     message: str = ""
 
 
@@ -95,10 +101,10 @@ def verify_state(payload: StateDiffRequest) -> Z3VerdictResponse:
 def compile_policy(payload: PolicyCompileRequest) -> PolicyCompileResponse:
     """Accept natural language policy string and compile into a tracked Z3 assertion."""
     try:
-        result = nl_compiler.compile_nl_rule(
+        result = nl_compiler.compile_nl_policy(
             cartridge_id=payload.cartridge_id,
             rule_id=payload.rule_id,
-            nl_text=payload.natural_language_rule,
+            natural_language_rule=payload.natural_language_rule,
         )
         return PolicyCompileResponse(**result)
     except Exception as e:
