@@ -119,3 +119,28 @@ export interface TelemetryEvent {
   cartridge_id: CartridgeId;
   node: TelemetryNode;
 }
+
+// ==========================================
+// Kernel Tamper-Evident Audit Log (GET /v1/kernel/audit-log)
+// ==========================================
+
+export interface AuditEntry {
+  index: number;
+  trace_id: string;
+  shadow_branch_id: string;
+  status: string;
+  timestamp_ns: number;
+  smt2_dump: string;
+  prev_hash: string;
+  entry_hash: string;
+}
+
+export interface AuditLogResponse {
+  length: number;
+  genesis_hash: string;
+  head_hash: string;
+  merkle_root: string;
+  verified: boolean;
+  entries: AuditEntry[];
+}
+

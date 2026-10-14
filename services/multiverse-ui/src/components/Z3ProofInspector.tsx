@@ -20,7 +20,8 @@ import {
   Shield,
   Layers,
 } from "lucide-react";
-import { TelemetryNode } from "../types/contracts";
+import { TelemetryNode, AuditLogResponse } from "../types/contracts";
+import { fetchOrComputeAuditLog } from "../utils/cryptoAudit";
 
 interface Z3ProofInspectorProps {
   node: TelemetryNode | null;
@@ -32,11 +33,17 @@ export const Z3ProofInspector: React.FC<Z3ProofInspectorProps> = ({
   onClose,
 }) => {
   const [copiedHash, setCopiedHash] = useState(false);
+  const [copiedRoot, setCopiedRoot] = useState(false);
+  const [copiedHead, setCopiedHead] = useState(false);
   const [copiedSmt2, setCopiedSmt2] = useState(false);
   const [diffMode, setDiffMode] = useState<"unified" | "split">("unified");
   const [merkleStatus, setMerkleStatus] = useState<
-    "idle" | "verifying" | "verified"
+    "idle" | "verifying" | "resolved"
   >("idle");
+  const [auditResult, setAuditResult] = useState<{
+    data: AuditLogResponse;
+    source: "KERNEL_API" | "LOCAL_CRYPTO";
+  } | null>(null);
 
   if (!node) {
     return (
@@ -88,13 +95,32 @@ export const Z3ProofInspector: React.FC<Z3ProofInspectorProps> = ({
     }
   };
 
-  // Merkle Chain Verification Simulation
-  const handleVerifyMerkleChain = () => {
-    if (merkleStatus !== "idle") return;
+  // Real Audit Log Verification via GET /v1/kernel/audit-log
+  const handleVerifyMerkleChain = async () => {
     setMerkleStatus("verifying");
-    setTimeout(() => {
-      setMerkleStatus("verified");
-    }, 700);
+    try {
+      const res = await fetchOrComputeAuditLog(node);
+      setAuditResult(res);
+      setMerkleStatus("resolved");
+    } catch {
+      setMerkleStatus("idle");
+    }
+  };
+
+  const handleCopyRoot = () => {
+    if (auditResult?.data.merkle_root) {
+      navigator.clipboard.writeText(auditResult.data.merkle_root);
+      setCopiedRoot(true);
+      setTimeout(() => setCopiedRoot(false), 2000);
+    }
+  };
+
+  const handleCopyHead = () => {
+    if (auditResult?.data.head_hash) {
+      navigator.clipboard.writeText(auditResult.data.head_hash);
+      setCopiedHead(true);
+      setTimeout(() => setCopiedHead(false), 2000);
+    }
   };
 
   // Pre vs Post Shadow State (Contract 2)
@@ -478,39 +504,130 @@ export const Z3ProofInspector: React.FC<Z3ProofInspectorProps> = ({
               {node.sha256_proof_hash}
             </div>
 
-            {/* "Verify Merkle Chain" Interactive Button */}
-            <div className="pt-1 border-t border-slate-800/80">
+            {/* "Verify Merkle Chain" Real Kernel Verification (GET /v1/kernel/audit-log) */}
+            <div className="pt-2 border-t border-slate-800/80 space-y-2">
               {merkleStatus === "idle" && (
                 <button
                   onClick={handleVerifyMerkleChain}
                   className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-md bg-cyan-950 hover:bg-cyan-900 border border-cyan-700/60 text-cyan-300 font-mono text-xs font-semibold transition-all shadow-sm"
                 >
                   <Network className="w-3.5 h-3.5 text-cyan-400" />
-                  <span>Verify Merkle Chain</span>
+                  <span>Verify Merkle Chain (GET /v1/kernel/audit-log)</span>
                 </button>
               )}
 
               {merkleStatus === "verifying" && (
                 <div className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-md bg-slate-900 border border-cyan-800 text-cyan-300 font-mono text-xs animate-pulse">
                   <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping" />
-                  <span>Traversing Merkle Audit Tree (Height 16)...</span>
+                  <span>Calling GET /v1/kernel/audit-log & verifying chain...</span>
                 </div>
               )}
 
-              {merkleStatus === "verified" && (
-                <div className="w-full bg-emerald-950/60 p-2.5 rounded-md border border-emerald-700/80 space-y-1">
-                  <div className="flex items-center justify-between text-[11px] text-emerald-300 font-bold">
-                    <span className="flex items-center gap-1.5">
-                      <ShieldCheck className="w-4 h-4 text-[#10B981]" />
-                      Merkle Chain Verified
-                    </span>
-                    <span className="text-[9px] bg-emerald-900/60 px-1.5 py-0.5 rounded border border-emerald-600/60">
-                      Block #419,204
-                    </span>
+              {merkleStatus === "resolved" && auditResult && (
+                <div className="space-y-2.5">
+                  {/* Verified Flag Badge */}
+                  <div
+                    className={`w-full p-2.5 rounded-md border space-y-1 ${
+                      auditResult.data.verified
+                        ? "bg-emerald-950/60 border-emerald-700/80"
+                        : "bg-red-950/70 border-red-700/80"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between text-[11px] font-bold">
+                      <span className="flex items-center gap-1.5">
+                        {auditResult.data.verified ? (
+                          <>
+                            <ShieldCheck className="w-4 h-4 text-[#10B981]" />
+                            <span className="text-emerald-300">
+                              verified: true // Cryptographically Sound
+                            </span>
+                          </>
+                        ) : (
+                          <>
+                            <ShieldAlert className="w-4 h-4 text-[#EF4444]" />
+                            <span className="text-red-300">
+                              verified: false // Tampering Detected
+                            </span>
+                          </>
+                        )}
+                      </span>
+
+                      <span className="text-[9px] uppercase px-1.5 py-0.5 rounded font-mono font-semibold bg-slate-900 border border-slate-700 text-slate-300">
+                        {auditResult.source === "KERNEL_API"
+                          ? "GET /v1/kernel/audit-log"
+                          : "Local WebCrypto Engine"}
+                      </span>
+                    </div>
+
+                    <p className="text-[9px] text-slate-400 font-mono">
+                      Chain Length: {auditResult.data.length} branch entry(s)
+                      verified against SHA-256 state tree.
+                    </p>
                   </div>
-                  <p className="text-[9px] text-emerald-400/80 font-mono">
-                    Deterministic proof leaf bound into chronological state tree. Zero rollback tampering detected.
-                  </p>
+
+                  {/* Real Merkle Root */}
+                  <div className="bg-slate-950 p-2 rounded border border-slate-800 space-y-1">
+                    <div className="flex items-center justify-between text-[10px]">
+                      <span className="text-slate-400 font-semibold uppercase text-[9px]">
+                        Merkle Root:
+                      </span>
+                      <button
+                        onClick={handleCopyRoot}
+                        className="flex items-center gap-1 text-[9px] text-cyan-400 hover:text-cyan-300 transition-colors"
+                      >
+                        {copiedRoot ? (
+                          <>
+                            <Check className="w-2.5 h-2.5 text-[#10B981]" />
+                            <span className="text-[#10B981]">Copied</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-2.5 h-2.5" />
+                            <span>Copy</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                    <div className="text-[10px] text-cyan-300 font-mono break-all select-all">
+                      {auditResult.data.merkle_root}
+                    </div>
+                  </div>
+
+                  {/* Real Head Hash */}
+                  <div className="bg-slate-950 p-2 rounded border border-slate-800 space-y-1">
+                    <div className="flex items-center justify-between text-[10px]">
+                      <span className="text-slate-400 font-semibold uppercase text-[9px]">
+                        Head Hash:
+                      </span>
+                      <button
+                        onClick={handleCopyHead}
+                        className="flex items-center gap-1 text-[9px] text-cyan-400 hover:text-cyan-300 transition-colors"
+                      >
+                        {copiedHead ? (
+                          <>
+                            <Check className="w-2.5 h-2.5 text-[#10B981]" />
+                            <span className="text-[#10B981]">Copied</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-2.5 h-2.5" />
+                            <span>Copy</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                    <div className="text-[10px] text-purple-300 font-mono break-all select-all">
+                      {auditResult.data.head_hash}
+                    </div>
+                  </div>
+
+                  {/* Re-verify action */}
+                  <button
+                    onClick={handleVerifyMerkleChain}
+                    className="w-full text-center py-1 rounded bg-slate-900 hover:bg-slate-800 border border-slate-800 text-[10px] text-slate-400 hover:text-slate-200 transition-colors"
+                  >
+                    ↻ Re-query GET /v1/kernel/audit-log
+                  </button>
                 </div>
               )}
             </div>
