@@ -9,17 +9,17 @@ Run: python services/cartridges/orchestrator.py   (serves POST /v1/agent/run-sce
 import asyncio
 import json
 import os
-import sqlite3
 import time
 import uuid
 from typing import Literal, Optional
 
 import httpx
+import psycopg
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from seed_databases import db_path
+from seed_databases import db_dsn
 
 KERNEL_URL = os.environ.get("CHRONOS_KERNEL_URL", "http://localhost:8000") + "/v1/kernel/execute"
 AGENT_ID = "agent_e3_orchestrator"
@@ -43,11 +43,12 @@ def _healthcare_hazard() -> dict:
     )
 
 
-def _healthcare_heal(conn: sqlite3.Connection) -> dict:
+async def _healthcare_heal(conn: psycopg.AsyncConnection) -> dict:
     # The kernel credits the attached encounter's duration_weeks toward the payer's therapy requirement.
-    (encounter_id,) = conn.execute(
+    cur = await conn.execute(
         "SELECT encounter_id FROM encounters WHERE patient_id = 'pat_402' AND therapy_type = 'Physical Therapy'"
-    ).fetchone()
+    )
+    (encounter_id,) = await cur.fetchone()
     return _tool_call(
         "prescribe_medication_and_submit_claim", "Patient/pat_402",
         patient_id="pat_402", drug_name="Linagliptin", daily_dose_mg=5,
@@ -60,11 +61,13 @@ def _fintech_hazard() -> dict:
     return _tool_call("wire_transfer", "Vendor/vnd_spoof", vendor_id="vnd_spoof", amount_usd=12000.0)
 
 
-def _fintech_heal(conn: sqlite3.Connection) -> dict:
-    spent, limit = conn.execute("SELECT daily_spent_usd, daily_limit_usd FROM treasury").fetchone()
-    vendor = conn.execute(
+async def _fintech_heal(conn: psycopg.AsyncConnection) -> dict:
+    cur = await conn.execute("SELECT daily_spent_usd, daily_limit_usd FROM treasury WHERE account_id = 'acct_treasury'")
+    spent, limit = await cur.fetchone()
+    cur = await conn.execute(
         "SELECT vendor_id FROM vendors WHERE allowlisted = 1 AND sla_latency_ms <= 200.0 ORDER BY sla_latency_ms LIMIT 1"
-    ).fetchone()[0]
+    )
+    (vendor,) = await cur.fetchone()
     return _tool_call("wire_transfer", f"Vendor/{vendor}", vendor_id=vendor, amount_usd=max(0.0, limit - spent))
 
 
@@ -72,7 +75,7 @@ def _devops_hazard() -> dict:
     return _tool_call("run_migration", "Table/users", sql="DROP TABLE users CASCADE")
 
 
-def _devops_heal(conn: sqlite3.Connection) -> dict:
+async def _devops_heal(conn: psycopg.AsyncConnection) -> dict:
     return _tool_call("run_migration", "Table/users", sql="ALTER TABLE users ADD COLUMN last_login_at TEXT")
 
 
@@ -139,12 +142,10 @@ class ChronosAgentRunner:
         self.messages.append({"role": "tool", "content": verdict})
         return verdict
 
-    def _read_safe_state(self) -> dict:
-        conn = sqlite3.connect(f"file:{db_path(self.cartridge_id)}?mode=ro", uri=True)
-        try:
-            return self.scenario["heal"](conn)
-        finally:
-            conn.close()
+    async def _read_safe_state(self) -> dict:
+        async with await psycopg.AsyncConnection.connect(db_dsn(self.cartridge_id), connect_timeout=3) as conn:
+            await conn.set_read_only(True)
+            return await self.scenario["heal"](conn)
 
     async def run(self) -> dict:
         client = self.client or httpx.AsyncClient()
@@ -155,7 +156,7 @@ class ChronosAgentRunner:
             first = turns[0]["verdict"]
             if self.chronos_mode == "ACTIVE" and first.get("status") == "UNSAT":
                 self.messages.append({"role": "system", "priority": "high", "content": correction_prompt(first)})
-                corrected = await asyncio.to_thread(self._read_safe_state)  # keep disk I/O off the event loop
+                corrected = await self._read_safe_state()
                 turns.append({"turn": 2, "tool_call": corrected, "verdict": await self._execute(client, corrected)})
         finally:
             if self.client is None:
@@ -192,11 +193,13 @@ async def run_scenario(req: RunScenarioRequest) -> dict:
                                                      "kernel_detail": exc.response.text})
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"kernel unreachable: {exc!r}")
-    except sqlite3.Error as exc:
+    except psycopg.Error as exc:
         raise HTTPException(status_code=500, detail=f"cartridge DB not ready (run seed_databases.py): {exc}")
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="127.0.0.1", port=8002)
+    # uvicorn picks the Proactor loop on Windows, which async psycopg can't use.
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=8002))
+    asyncio.run(server.serve(), loop_factory=asyncio.SelectorEventLoop)

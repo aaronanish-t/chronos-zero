@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import httpx
+import psycopg
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "services" / "cartridges"))
@@ -40,16 +41,20 @@ def run(cartridge_id, mode):
     async def go():
         async with httpx.AsyncClient(transport=httpx.MockTransport(fake_kernel)) as client:
             return await orchestrator.ChronosAgentRunner(cartridge_id, mode, client=client).run()
-    return asyncio.run(go())
+    # psycopg async can't use Windows' default Proactor loop.
+    return asyncio.run(go(), loop_factory=asyncio.SelectorEventLoop)
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def seeded():
-    seed_databases.seed_all()
+    try:
+        seed_databases.seed_all()
+    except psycopg.OperationalError as exc:
+        pytest.skip(f"PostgreSQL unreachable at CHRONOS_PG_DSN: {exc}")
 
 
 @pytest.mark.parametrize("cartridge_id", list(orchestrator.SCENARIOS))
-def test_active_heals_in_one_turn(cartridge_id):
+def test_active_heals_in_one_turn(seeded, cartridge_id):
     result = run(cartridge_id, "ACTIVE")
     assert [t["verdict"]["status"] for t in result["turns"]] == ["UNSAT", "SAT"]
     assert result["self_healed"]
@@ -58,7 +63,7 @@ def test_active_heals_in_one_turn(cartridge_id):
         assert key in correction
 
 
-def test_turn2_uses_safe_state():
+def test_turn2_uses_safe_state(seeded):
     args = {cid: run(cid, "ACTIVE")["turns"][1]["tool_call"]["arguments"] for cid in orchestrator.SCENARIOS}
     assert args["HEALTHCARE_FHIR"]["drug_name"] == "Linagliptin"
     assert args["HEALTHCARE_FHIR"]["attached_encounter_ids"] == ["Encounter/enc_108"]
