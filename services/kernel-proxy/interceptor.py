@@ -315,30 +315,36 @@ def create_app(
         branch_id, state_pre, state_post, fork_ms = await _run_engine(
             engine.fork_and_mutate(req.cartridge_id, handler.state_reader, handler.mutation, tool_call)
         )
-        diff = StateDiffRequest(
-            trace_id=req.trace_id,
-            shadow_branch_id=branch_id,
-            cartridge_id=req.cartridge_id,
-            cow_fork_latency_ms=fork_ms,
-            state_pre=state_pre,
-            state_post_shadow=state_post,
-        )
 
         verdict: Optional[Z3VerdictResponse] = None
         failure: Optional[str] = None
+        audited = False
         try:
+            # Everything after the fork sits inside this try, so no exception (or cancellation)
+            # can leave the branch's connection pinned.
+            diff = StateDiffRequest(
+                trace_id=req.trace_id,
+                shadow_branch_id=branch_id,
+                cartridge_id=req.cartridge_id,
+                cow_fork_latency_ms=fork_ms,
+                state_pre=state_pre,
+                state_post_shadow=state_post,
+            )
             verdict = await _verify(app.state.z3_client, z3_verify_url, diff)
             try:
                 # Receipt first: nothing commits without an audit entry.
                 await audit.append(req.trace_id, branch_id, verdict.smt2_dump, verdict.status, req.timestamp_ns)
+                audited = True
             except Exception as exc:
                 failure = f"audit chain append failed: {exc}"
         except Exception as exc:  # fail closed: any verifier problem means no commit
             failure = f"Z3 verification failed: {exc}"
         finally:
             # Always resolve, so the pinned connection (and its row locks) is released.
-            # A failed COMMIT (e.g. 40001) is rolled back by the engine and surfaces as 409.
-            commit = failure is None and verdict is not None and verdict.status == "SAT"
+            # Commit only on a SAT verdict whose receipt is known to be written; a cancellation
+            # mid-append leaves audited False and rolls back. A failed COMMIT (e.g. 40001) is
+            # rolled back by the engine and surfaces as 409.
+            commit = audited and failure is None and verdict is not None and verdict.status == "SAT"
             await _run_engine(engine.resolve(branch_id, commit))
 
         if failure is not None:
@@ -400,6 +406,8 @@ def create_app(
                         results.append({"step": i, **out})
                     except HTTPException as exc:
                         results.append({"step": i, "status_code": exc.status_code, "error": exc.detail})
+                    except Exception as exc:  # a lane never raises, so gather() never drops the sandbox under the other
+                        results.append({"step": i, "status_code": 500, "error": f"{type(exc).__name__}: {exc}"})
                 return results
 
             async def active_lane() -> list[dict[str, Any]]:
@@ -410,6 +418,8 @@ def create_app(
                         results.append({"step": i, "verdict": verdict.model_dump(mode="json")})
                     except HTTPException as exc:
                         results.append({"step": i, "status_code": exc.status_code, "error": exc.detail})
+                    except Exception as exc:
+                        results.append({"step": i, "status_code": 500, "error": f"{type(exc).__name__}: {exc}"})
                 return results
 
             try:

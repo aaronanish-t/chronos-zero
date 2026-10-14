@@ -177,6 +177,9 @@ CARTRIDGE_SCHEMAS: Dict[str, Dict[str, Any]] = {
     },
 }
 
+# Contract 3 rule_id pattern (contracts/z3_verdict.schema.json): compiled rules surface there.
+RULE_ID_PATTERN = re.compile(r"^INV_[A-Z]+_[0-9]{2}_[A-Z0-9_]+$")
+
 # Active dynamic rules registry keyed by cartridge_id
 DYNAMIC_RULES: Dict[str, List[Dict[str, Any]]] = {
     "HEALTHCARE_FHIR": [],
@@ -460,7 +463,13 @@ def make_rule_builder(
         for var_name, var_info in schema["variables"].items():
             z_var = scope[var_name]
             val = None
-            if var_name in state_post:
+            # Prefer the value the cartridge's static solver already bound (ctx): the dynamic rule
+            # shares that solver, and a second, different binding for the same variable (e.g.
+            # post-transfer daily_escrow_spent_usd vs the pre-transfer value) makes every check
+            # unsat with an empty core, which silently disabled compiled rules on real kernel diffs.
+            if var_name in ctx:
+                val = ctx[var_name]
+            elif var_name in state_post:
                 val = state_post[var_name]
             elif var_name in state_pre:
                 val = state_pre[var_name]
@@ -612,6 +621,17 @@ def _synthesize_pattern_expression(cartridge_id: str, text: str) -> str:
             lat = float(lat_m.group(1)) if lat_m else 200.0
             return f"Implies(transfer_amount_usd > {amt}, vendor_latency_ms <= {lat})"
 
+    # 1b. Fintech vendor SLA latency bound ("Only pay vendors whose SLA latency is under 100 ms")
+    if cartridge_id == "FINTECH_ESCROW" and "latency" in lower:
+        m_lat = re.search(
+            r"(under|below|less than|<=|<|at most|no more than|within|over|above|exceeding|exceeds|exceed|>)"
+            r"\s*([0-9]+(?:\.[0-9]+)?)\s*ms",
+            lower,
+        )
+        if m_lat:
+            op = "<" if m_lat.group(1) in ("under", "below", "less than", "<") else "<="
+            return f"Implies(transfer_amount_usd > 0, vendor_latency_ms {op} {float(m_lat.group(2))})"
+
     # 2. Fintech wire cap
     if cartridge_id == "FINTECH_ESCROW" and ("wire" in lower or "transfer" in lower):
         m_amt = re.search(r"(?:exceeding|over|>|above|limit|cap|to)\s*\$?([0-9,]+(?:\.[0-9]+)?)", lower)
@@ -644,7 +664,9 @@ def _synthesize_pattern_expression(cartridge_id: str, text: str) -> str:
         return f"Implies(claim_submitted == True, conservative_therapy_weeks >= {w})"
 
     # 7. Cloud DevOps zero data loss
-    if cartridge_id == "CLOUD_DEVOPS" and ("zero data loss" in lower or "row" in lower or "loss" in lower):
+    if cartridge_id == "CLOUD_DEVOPS" and any(
+        k in lower for k in ("zero data loss", "row", "loss", "drop", "truncate", "delete", "destructive")
+    ):
         return "prod_table_row_count_post >= prod_table_row_count_pre"
 
     # 8. Cloud DevOps admin port
@@ -729,6 +751,10 @@ def compile_nl_policy(
     t0 = time.perf_counter_ns()
     text = natural_language_rule.strip()
 
+    if not RULE_ID_PATTERN.match(rule_id):
+        raise ValueError(
+            f"rule_id '{rule_id}' must match the Contract 3 pattern {RULE_ID_PATTERN.pattern}"
+        )
     if cartridge_id not in CARTRIDGE_SCHEMAS:
         raise ValueError(
             f"Invalid cartridge_id '{cartridge_id}'. Must be one of: {list(CARTRIDGE_SCHEMAS.keys())}"

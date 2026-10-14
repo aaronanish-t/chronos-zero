@@ -24,7 +24,9 @@ from scenarios import SCENARIOS
 from scenarios.judge_policies import match_policy, scenario_key
 from seed_databases import db_dsn
 
-KERNEL_URL = os.environ.get("CHRONOS_KERNEL_URL", "http://localhost:8000") + "/v1/kernel/execute"
+# 127.0.0.1, not localhost: the kernel binds IPv4 loopback only, and resolving localhost to ::1
+# first adds a refused-connection retry to every new connection (AGENTS.md section 4.1).
+KERNEL_URL = os.environ.get("CHRONOS_KERNEL_URL", "http://127.0.0.1:8000") + "/v1/kernel/execute"
 AGENT_ID = "agent_e3_orchestrator"
 
 CartridgeId = Literal["HEALTHCARE_FHIR", "FINTECH_ESCROW", "CLOUD_DEVOPS"]

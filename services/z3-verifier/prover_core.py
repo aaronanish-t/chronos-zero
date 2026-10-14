@@ -27,6 +27,9 @@ from contracts.schemas import StateDiffRequest, ViolatedInvariant, Z3VerdictResp
 from invariants import healthcare_fhir, fintech_escrow, cloud_devops  # noqa: E402
 import nl_compiler  # noqa: E402
 
+# Contract 3 rule_id for a state delta the solver could not even be built from.
+MALFORMED_RULE_ID = "INV_SYS_00_MALFORMED_STATE"
+
 # Combined static rule registries for all cartridges
 RULE_REGISTRIES: Dict[str, Dict[str, Dict[str, str]]] = {
     "HEALTHCARE_FHIR": healthcare_fhir.RULE_REGISTRY,
@@ -141,16 +144,23 @@ def dispatch_verification(
             }
             tracked_rules.append((r_id, dyn))
 
-        # Check each rule independently via push/pop to collect ALL broken invariants
+        # Check each rule independently via push/pop to collect ALL broken invariants.
+        # Fail closed: a rule counts as violated when the solver says unsat (even with an empty
+        # core, i.e. the bindings themselves conflict) or cannot decide within the 50 ms timeout.
         failed_ids = []
+        timed_out = set()
         for r_id, item in tracked_rules:
             s.push()
             if isinstance(item, dict) and "builder" in item:
                 item["builder"](s, state_pre, state_post, context)
             else:
                 s.assert_and_track(item, r_id)
-            if s.check() == unsat:
-                failed_ids.extend([str(c) for c in s.unsat_core()])
+            result = s.check()
+            if result == unsat:
+                failed_ids.extend([str(c) for c in s.unsat_core()] or [r_id])
+            elif result == unknown:
+                failed_ids.append(r_id)
+                timed_out.add(r_id)
             s.pop()
 
         # Build full tracked formula for SMT2 dump
@@ -192,6 +202,8 @@ def dispatch_verification(
                     cex = f"cidr_open_world={context.get('cidr_open_world')}, port_number={context.get('port_number')}"
                 else:
                     cex = f"State delta rejected by {r_id}: {context}"
+                if r_id in timed_out:
+                    cex += " [solver returned unknown within the 50 ms timeout; rejected fail-closed]"
 
                 violated_list.append(
                     ViolatedInvariant(
@@ -209,7 +221,7 @@ def dispatch_verification(
         smt2_dump = ""
         violated_list.append(
             ViolatedInvariant(
-                rule_id="MALFORMED_STATE",
+                rule_id=MALFORMED_RULE_ID,
                 formal_assertion="valid_state_delta",
                 counterexample=f"State rejected: {str(e)}",
                 remediation_hint=f"Malformed state payload rejected: {str(e)}",

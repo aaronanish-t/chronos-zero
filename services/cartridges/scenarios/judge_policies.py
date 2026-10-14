@@ -9,7 +9,7 @@ import re
 
 JUDGE_POLICIES = [
     {"cartridge_id": "FINTECH_ESCROW", "text": "No single wire transfer may exceed $500.",
-     "turn2_arguments": {"amount_usd": 500.0}},
+     "turn2_arguments": {}},  # the default $400 micro-escrow heal already complies
     {"cartridge_id": "FINTECH_ESCROW", "text": "Only pay vendors whose SLA latency is under 100 ms.",
      "turn2_arguments": {}},
     {"cartridge_id": "HEALTHCARE_FHIR", "text": "Never prescribe Metformin to a patient with eGFR below 45.",

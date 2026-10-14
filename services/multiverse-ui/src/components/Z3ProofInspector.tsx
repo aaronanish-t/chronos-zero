@@ -20,8 +20,8 @@ import {
   Shield,
   Layers,
 } from "lucide-react";
-import { TelemetryNode, AuditLogResponse } from "../types/contracts";
-import { fetchOrComputeAuditLog } from "../utils/cryptoAudit";
+import { TelemetryNode } from "../types/contracts";
+import { AuditVerification, fetchAndVerifyAuditLog } from "../utils/cryptoAudit";
 
 interface Z3ProofInspectorProps {
   node: TelemetryNode | null;
@@ -40,10 +40,8 @@ export const Z3ProofInspector: React.FC<Z3ProofInspectorProps> = ({
   const [merkleStatus, setMerkleStatus] = useState<
     "idle" | "verifying" | "resolved"
   >("idle");
-  const [auditResult, setAuditResult] = useState<{
-    data: AuditLogResponse;
-    source: "KERNEL_API" | "LOCAL_CRYPTO";
-  } | null>(null);
+  const [auditResult, setAuditResult] = useState<AuditVerification | null>(null);
+  const [auditError, setAuditError] = useState<string | null>(null);
 
   if (!node) {
     return (
@@ -64,19 +62,16 @@ export const Z3ProofInspector: React.FC<Z3ProofInspectorProps> = ({
   const isSafe = node.branch_type === "COMMITTED_SAFE";
   const isCorrupted = node.branch_type === "BYPASS_CORRUPTED";
 
-  // Latency calculation
-  const cowForkMs =
-    node.cow_fork_latency_ms ?? Number((node.total_latency_ms * 0.38).toFixed(2));
-  const z3ProofMs =
-    node.proof_latency_ms ??
-    Number((node.total_latency_ms - cowForkMs).toFixed(2));
+  // Latency: Contract 4 total_latency_ms and the Contract 3 proof_latency_ms (when the run's
+  // verdict has been merged in). The rest is the kernel: CoW fork, commit/rollback, audit append.
   const totalMs = node.total_latency_ms;
+  const z3ProofMs = typeof node.proof_latency_ms === "number" ? node.proof_latency_ms : null;
+  const kernelMs = z3ProofMs !== null ? Math.max(0, totalMs - z3ProofMs) : totalMs;
   const llmBaselineMs = 1450.0;
-  const speedupX = totalMs > 0 ? (llmBaselineMs / totalMs).toFixed(0) : "424";
+  const speedupX = totalMs > 0 ? (llmBaselineMs / totalMs).toFixed(0) : null;
 
-  // Relative percentages for latency breakdown bar (scaled to 100% of Chronos total)
-  const cowPercent = Math.max(15, (cowForkMs / (totalMs || 1)) * 100);
-  const z3Percent = Math.max(15, 100 - cowPercent);
+  const z3Percent = z3ProofMs !== null && totalMs > 0 ? Math.min(100, (z3ProofMs / totalMs) * 100) : 0;
+  const cowPercent = 100 - z3Percent;
 
   // Copy handlers
   const handleCopyHash = () => {
@@ -95,14 +90,15 @@ export const Z3ProofInspector: React.FC<Z3ProofInspectorProps> = ({
     }
   };
 
-  // Real Audit Log Verification via GET /v1/kernel/audit-log
+  // GET /v1/kernel/audit-log, then recompute the whole chain in the browser (WebCrypto)
   const handleVerifyMerkleChain = async () => {
     setMerkleStatus("verifying");
+    setAuditError(null);
     try {
-      const res = await fetchOrComputeAuditLog(node);
-      setAuditResult(res);
+      setAuditResult(await fetchAndVerifyAuditLog(node));
       setMerkleStatus("resolved");
-    } catch {
+    } catch (e) {
+      setAuditError((e as Error).message);
       setMerkleStatus("idle");
     }
   };
@@ -123,28 +119,11 @@ export const Z3ProofInspector: React.FC<Z3ProofInspectorProps> = ({
     }
   };
 
-  // Pre vs Post Shadow State (Contract 2)
-  const preState =
-    node.state_pre ||
-    (isRejected
-      ? {
-          status: "PRE_MUTATION",
-          escrow_balance: 500000,
-          pending_payout: 0,
-          account_lock: false,
-        }
-      : { status: "PRE_MUTATION", verified: true });
-
-  const postShadowState =
-    node.state_post_shadow ||
-    (isRejected
-      ? {
-          status: "SHADOW_DEFICIT",
-          escrow_balance: 315000,
-          pending_payout: 185000,
-          account_lock: true,
-        }
-      : { status: "COMMITTED_SETTLED", verified: true });
+  // Real state only: BYPASS runs return state_pre/state_post; ACTIVE verdicts (Contract 3)
+  // carry no state, so the tool call itself is shown instead.
+  const hasState = Boolean(node.state_pre && node.state_post_shadow);
+  const preState = (node.state_pre ?? {}) as Record<string, unknown>;
+  const postShadowState = (node.state_post_shadow ?? {}) as Record<string, unknown>;
 
   // Generate clean unified diff lines
   const allKeys = Array.from(
@@ -211,27 +190,29 @@ export const Z3ProofInspector: React.FC<Z3ProofInspectorProps> = ({
               <Clock className="w-3.5 h-3.5 text-cyan-400" />
               Latency Breakdown Bar
             </span>
-            <span className="text-[10px] text-cyan-400 font-bold bg-cyan-950/60 px-1.5 py-0.5 rounded border border-cyan-800/60">
-              ⚡ {speedupX}x Faster than LLM
-            </span>
+            {speedupX && (
+              <span className="text-[10px] text-cyan-400 font-bold bg-cyan-950/60 px-1.5 py-0.5 rounded border border-cyan-800/60">
+                {speedupX}x faster than a 1,450 ms LLM guardrail
+              </span>
+            )}
           </div>
 
           {/* Numerical breakdown row */}
           <div className="grid grid-cols-3 gap-2 text-center text-[10px]">
             <div className="bg-slate-950/90 p-2 rounded border border-slate-800">
               <span className="text-[9px] uppercase text-slate-500 block">
-                CoW Fork
+                Kernel (CoW + resolve)
               </span>
               <span className="text-cyan-400 font-bold numeral-mono text-xs">
-                {cowForkMs.toFixed(2)} ms
+                {kernelMs.toFixed(2)} ms
               </span>
             </div>
             <div className="bg-slate-950/90 p-2 rounded border border-slate-800">
               <span className="text-[9px] uppercase text-slate-500 block">
-                Z3 Solver
+                Z3 Proof
               </span>
               <span className="text-purple-400 font-bold numeral-mono text-xs">
-                {z3ProofMs.toFixed(2)} ms
+                {z3ProofMs !== null ? `${z3ProofMs.toFixed(2)} ms` : "--"}
               </span>
             </div>
             <div className="bg-slate-950/90 p-2 rounded border border-slate-800">
@@ -260,12 +241,12 @@ export const Z3ProofInspector: React.FC<Z3ProofInspectorProps> = ({
               <div
                 style={{ width: `${cowPercent}%` }}
                 className="h-full bg-cyan-500 shadow-[0_0_8px_#06B6D4]"
-                title={`CoW Fork: ${cowForkMs.toFixed(2)}ms`}
+                title={`Kernel: ${kernelMs.toFixed(2)}ms`}
               />
               <div
                 style={{ width: `${z3Percent}%` }}
                 className="h-full bg-purple-500 shadow-[0_0_8px_#8B5CF6]"
-                title={`Z3 Solver: ${z3ProofMs.toFixed(2)}ms`}
+                title={z3ProofMs !== null ? `Z3 Proof: ${z3ProofMs.toFixed(2)}ms` : "Z3 proof time not reported"}
               />
             </div>
           </div>
@@ -284,7 +265,28 @@ export const Z3ProofInspector: React.FC<Z3ProofInspectorProps> = ({
           </div>
         </div>
 
-        {/* 2. State Diff: state_pre vs state_post_shadow JSON diff */}
+        {/* 2a. Tool call as the agent sent it (Contract 1) */}
+        {node.tool_call && (
+          <div className="bg-[#0F172A] p-3 rounded-lg border border-[#1E293B] space-y-2">
+            <div className="flex items-center justify-between text-[11px] font-semibold text-slate-200">
+              <span className="flex items-center gap-1.5">
+                <Terminal className="w-3.5 h-3.5 text-cyan-400" />
+                Agent Tool Call (Contract 1)
+              </span>
+              {node.agent_source && (
+                <span className="text-[9px] text-slate-400 bg-slate-950 px-1.5 py-0.5 rounded border border-slate-800">
+                  source: {node.agent_source}
+                </span>
+              )}
+            </div>
+            <pre className="bg-slate-950 p-2.5 rounded border border-slate-800 text-[10px] text-slate-300 overflow-x-auto max-h-40 leading-relaxed">
+              <code>{JSON.stringify(node.tool_call, null, 2)}</code>
+            </pre>
+          </div>
+        )}
+
+        {/* 2b. State Diff: state_pre vs state_post (BYPASS runs report production state) */}
+        {hasState && (
         <div className="bg-[#0F172A] p-3 rounded-lg border border-[#1E293B] space-y-2">
           <div className="flex items-center justify-between text-[11px] font-semibold text-slate-200">
             <span className="flex items-center gap-1.5">
@@ -392,6 +394,7 @@ export const Z3ProofInspector: React.FC<Z3ProofInspectorProps> = ({
             </div>
           )}
         </div>
+        )}
 
         {/* 3. UnsatCore Remediation Hints (when UNSAT) */}
         {node.violated_invariants && node.violated_invariants.length > 0 && (
@@ -506,6 +509,11 @@ export const Z3ProofInspector: React.FC<Z3ProofInspectorProps> = ({
 
             {/* "Verify Merkle Chain" Real Kernel Verification (GET /v1/kernel/audit-log) */}
             <div className="pt-2 border-t border-slate-800/80 space-y-2">
+              {merkleStatus === "idle" && auditError && (
+                <div className="w-full p-2 rounded-md bg-red-950/70 border border-red-800 text-red-300 text-[10px]">
+                  Cannot verify: {auditError}
+                </div>
+              )}
               {merkleStatus === "idle" && (
                 <button
                   onClick={handleVerifyMerkleChain}
@@ -528,40 +536,48 @@ export const Z3ProofInspector: React.FC<Z3ProofInspectorProps> = ({
                   {/* Verified Flag Badge */}
                   <div
                     className={`w-full p-2.5 rounded-md border space-y-1 ${
-                      auditResult.data.verified
+                      auditResult.chainVerified && auditResult.rootMatches
                         ? "bg-emerald-950/60 border-emerald-700/80"
                         : "bg-red-950/70 border-red-700/80"
                     }`}
                   >
                     <div className="flex items-center justify-between text-[11px] font-bold">
                       <span className="flex items-center gap-1.5">
-                        {auditResult.data.verified ? (
+                        {auditResult.chainVerified && auditResult.rootMatches ? (
                           <>
                             <ShieldCheck className="w-4 h-4 text-[#10B981]" />
-                            <span className="text-emerald-300">
-                              verified: true // Cryptographically Sound
-                            </span>
+                            <span className="text-emerald-300">Chain re-verified in browser</span>
                           </>
                         ) : (
                           <>
                             <ShieldAlert className="w-4 h-4 text-[#EF4444]" />
-                            <span className="text-red-300">
-                              verified: false // Tampering Detected
-                            </span>
+                            <span className="text-red-300">Chain mismatch: tampering detected</span>
                           </>
                         )}
                       </span>
 
                       <span className="text-[9px] uppercase px-1.5 py-0.5 rounded font-mono font-semibold bg-slate-900 border border-slate-700 text-slate-300">
-                        {auditResult.source === "KERNEL_API"
-                          ? "GET /v1/kernel/audit-log"
-                          : "Local WebCrypto Engine"}
+                        WebCrypto SHA-256
                       </span>
                     </div>
 
                     <p className="text-[9px] text-slate-400 font-mono">
-                      Chain Length: {auditResult.data.length} branch entry(s)
-                      verified against SHA-256 state tree.
+                      {auditResult.data.length} entries: every entry hash, prev-hash link and the Merkle root
+                      recomputed client-side ({auditResult.rootMatches ? "root matches" : "root differs"}).
+                    </p>
+                    <p className="text-[9px] font-mono">
+                      {auditResult.entry ? (
+                        <span className="text-slate-300">
+                          This branch is entry #{auditResult.entry.index} ({auditResult.entry.status}).{" "}
+                          {auditResult.receiptMatches === null
+                            ? ""
+                            : auditResult.receiptMatches
+                            ? "SHA-256(smt2_dump) matches this receipt."
+                            : "Receipt does NOT match the logged SMT-LIB2."}
+                        </span>
+                      ) : (
+                        <span className="text-amber-300">This node has no entry in the current chain.</span>
+                      )}
                     </p>
                   </div>
 

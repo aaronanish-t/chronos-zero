@@ -56,12 +56,12 @@ def test_nl_compiler_fintech_wire_cap():
     """Verify plain English wire cap compiles into correct Z3 constraint."""
     res = compile_nl_policy(
         cartridge_id="FINTECH_ESCROW",
-        rule_id="INV_DYN_WIRE_5K",
+        rule_id="INV_DYN_01_WIRE_5K",
         natural_language_rule="Block wire transfer exceeding $5,000",
     )
     assert res["status"] == "COMPILED"
     assert res["cartridge_id"] == "FINTECH_ESCROW"
-    assert res["rule_id"] == "INV_DYN_WIRE_5K"
+    assert res["rule_id"] == "INV_DYN_01_WIRE_5K"
     assert res["formal_assertion"] == "transfer_amount_usd <= 5000.0"
     assert res["compiled_code"] == "transfer_amount_usd <= 5000.0"
     assert "(assert" in res["smt2_dump"]
@@ -74,7 +74,7 @@ def test_nl_compiler_fintech_wire_unless_sla():
     """Verify conditional wire rule with SLA and allowlist compiles to Implies(..., And(...))."""
     res = compile_nl_policy(
         cartridge_id="FINTECH_ESCROW",
-        rule_id="INV_DYN_WIRE_SLA",
+        rule_id="INV_DYN_01_WIRE_SLA",
         natural_language_rule="Block wire transfer exceeding $5,000 unless vendor_latency_ms <= 150.0 and iban_allowlisted is True",
     )
     assert res["status"] == "COMPILED"
@@ -86,7 +86,7 @@ def test_nl_compiler_healthcare_renal():
     """Verify healthcare renal safety rule compiles with eGFR threshold and metformin dose 0."""
     res = compile_nl_policy(
         cartridge_id="HEALTHCARE_FHIR",
-        rule_id="INV_DYN_RENAL_SAFETY",
+        rule_id="INV_DYN_01_RENAL_SAFETY",
         natural_language_rule="Block metformin if patient eGFR is below 30",
     )
     assert res["status"] == "COMPILED"
@@ -98,7 +98,7 @@ def test_nl_compiler_devops_zero_data_loss():
     """Verify DevOps zero data loss compiles to row count post >= pre."""
     res = compile_nl_policy(
         cartridge_id="CLOUD_DEVOPS",
-        rule_id="INV_DYN_ZERO_LOSS",
+        rule_id="INV_DYN_01_ZERO_LOSS",
         natural_language_rule="Zero data loss during schema migration",
     )
     assert res["status"] == "COMPILED"
@@ -109,7 +109,7 @@ def test_nl_compiler_devops_admin_port():
     """Verify DevOps port protection compiles to Not(And(cidr_open_world == True, port_number == 22))."""
     res = compile_nl_policy(
         cartridge_id="CLOUD_DEVOPS",
-        rule_id="INV_DYN_SSH_BLOCK",
+        rule_id="INV_DYN_01_SSH_BLOCK",
         natural_language_rule="Block open SSH on port 22",
     )
     assert res["status"] == "COMPILED"
@@ -121,7 +121,7 @@ def test_nl_compiler_direct_z3_expression():
     raw_expr = "Implies(patient_egfr_ml_min < 45.0, prescribed_dose_mg <= 1000)"
     res = compile_nl_policy(
         cartridge_id="HEALTHCARE_FHIR",
-        rule_id="INV_DYN_CUSTOM_EXPR",
+        rule_id="INV_DYN_01_CUSTOM_EXPR",
         natural_language_rule=raw_expr,
     )
     assert res["status"] == "COMPILED"
@@ -193,7 +193,7 @@ def test_synthetic_vector_contradiction_rejected():
     with pytest.raises(PolicyCompilationError):
         compile_nl_policy(
             cartridge_id="FINTECH_ESCROW",
-            rule_id="INV_DYN_CONTRADICTION",
+            rule_id="INV_DYN_01_CONTRADICTION",
             natural_language_rule=contradiction,
         )
 
@@ -204,7 +204,7 @@ def test_synthetic_vector_tautology_rejected():
     with pytest.raises(PolicyCompilationError):
         compile_nl_policy(
             cartridge_id="FINTECH_ESCROW",
-            rule_id="INV_DYN_TAUTOLOGY",
+            rule_id="INV_DYN_01_TAUTOLOGY",
             natural_language_rule=tautology,
         )
 
@@ -218,7 +218,7 @@ def test_compiled_rule_immediate_enforcement_in_dispatch():
     # 1. Compile wire limit of $3,000
     res = compile_nl_policy(
         cartridge_id="FINTECH_ESCROW",
-        rule_id="INV_DYN_WIRE_3K",
+        rule_id="INV_DYN_01_WIRE_3K",
         natural_language_rule="Block wire transfer exceeding $3,000",
     )
     assert res["status"] == "COMPILED"
@@ -242,7 +242,7 @@ def test_compiled_rule_immediate_enforcement_in_dispatch():
     verdict = dispatch_verification(violating_payload)
     assert verdict.status == "UNSAT"
     violated = {v.rule_id for v in verdict.violated_invariants}
-    assert "INV_DYN_WIRE_3K" in violated
+    assert "INV_DYN_01_WIRE_3K" in violated
 
     # 3. Test transfer of $2,000 (passes both static and dynamic rules)
     passing_payload = {
@@ -273,7 +273,7 @@ def test_server_compile_policy_endpoint(client: TestClient):
     """Test POST /v1/z3/compile-policy endpoint returns all required telemetry fields."""
     req_body = {
         "cartridge_id": "FINTECH_ESCROW",
-        "rule_id": "INV_DYN_HTTP_TEST",
+        "rule_id": "INV_DYN_01_HTTP_TEST",
         "natural_language_rule": "Block wire transfer exceeding $7,500",
     }
     res = client.post("/v1/z3/compile-policy", json=req_body)
@@ -281,7 +281,7 @@ def test_server_compile_policy_endpoint(client: TestClient):
     data = res.json()
     assert data["status"] == "COMPILED"
     assert data["cartridge_id"] == "FINTECH_ESCROW"
-    assert data["rule_id"] == "INV_DYN_HTTP_TEST"
+    assert data["rule_id"] == "INV_DYN_01_HTTP_TEST"
     assert "transfer_amount_usd <= 7500.0" in data["formal_assertion"]
     assert data["compiled_code"] == "transfer_amount_usd <= 7500.0"
     assert "(assert" in data["smt2_dump"]
@@ -293,7 +293,7 @@ def test_server_compile_policy_rejects_attack(client: TestClient):
     """Test POST /v1/z3/compile-policy fails closed with status=ERROR on AST injection."""
     req_body = {
         "cartridge_id": "FINTECH_ESCROW",
-        "rule_id": "INV_DYN_ATTACK",
+        "rule_id": "INV_DYN_01_ATTACK",
         "natural_language_rule": "__import__('os').system('ls')",
     }
     res = client.post("/v1/z3/compile-policy", json=req_body)

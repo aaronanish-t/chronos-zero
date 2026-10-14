@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { CartridgeId, ChronosMode } from "../types/contracts";
 import { TelemetryMetrics, WSConnectionStatus } from "../hooks/useChronosWS";
+import type { BenchmarkSummary } from "../app/api/benchmark/route";
 
 /**
  * Animated Integer Counter using Framer Motion
@@ -79,9 +80,9 @@ interface TopTelemetryBarProps {
   setActiveCartridge: (cartridge: CartridgeId) => void;
   chronosMode?: ChronosMode;
   onToggleChronosMode?: () => void;
-  isSimulating: boolean;
-  onSimulate: (cartridge: CartridgeId) => void;
-  onSimulateBypass: () => void;
+  isRunning: boolean;
+  onRun: (cartridge: CartridgeId) => void;
+  onRunBypass: (cartridge: CartridgeId) => void;
   onReset: () => void;
   onOpenSplitDemo?: () => void;
 }
@@ -93,37 +94,20 @@ export const TopTelemetryBar: React.FC<TopTelemetryBarProps> = ({
   setActiveCartridge,
   chronosMode = "ACTIVE",
   onToggleChronosMode,
-  isSimulating,
-  onSimulate,
-  onSimulateBypass,
+  isRunning,
+  onRun,
+  onRunBypass,
   onReset,
   onOpenSplitDemo,
 }) => {
-  const [benchmark, setBenchmark] = useState<{
-    badge_text: string;
-    speedup_factor: number;
-    llm_guardrail_baseline_ms: number;
-    chronos_p50_latency_ms: number;
-    chronos_p99_latency_ms: number;
-    cow_fork_p50_ms?: number;
-    z3_solve_p50_ms?: number;
-  } | null>(null);
+  // Measured numbers only (contracts/benchmark_report.json, written by `make bench`).
+  const [benchmark, setBenchmark] = useState<BenchmarkSummary | null>(null);
 
   useEffect(() => {
     fetch("/api/benchmark")
       .then((res) => res.json())
-      .then((data) => setBenchmark(data))
-      .catch(() => {
-        setBenchmark({
-          badge_text: "350x Faster than LLM Guardrails",
-          speedup_factor: 350,
-          llm_guardrail_baseline_ms: 1450.0,
-          chronos_p50_latency_ms: 4.14,
-          chronos_p99_latency_ms: 7.82,
-          cow_fork_p50_ms: 1.18,
-          z3_solve_p50_ms: 1.82,
-        });
-      });
+      .then((data: BenchmarkSummary) => setBenchmark(data))
+      .catch(() => setBenchmark(null));
   }, []);
 
   // 1-Click Cartridge Switcher configuration with pilot shortcuts
@@ -189,55 +173,56 @@ export const TopTelemetryBar: React.FC<TopTelemetryBarProps> = ({
               <>
                 <WifiOff className="w-3.5 h-3.5 text-slate-400" />
                 <span className="text-slate-400 font-medium">
-                  WS: STANDALONE (MOCK)
+                  WS: KERNEL :8000 OFFLINE
                 </span>
               </>
             )}
           </div>
 
-          {/* Live "350x Faster than LLM Guardrails" Comparison Badge */}
+          {/* Measured benchmark badge (CoW + Z3 cycles vs an LLM guardrail baseline) */}
           <div
             className="hidden xl:flex items-center gap-2 px-2.5 py-1 rounded-lg bg-gradient-to-r from-cyan-950/90 via-slate-900/90 to-emerald-950/90 border border-cyan-500/50 shadow-[0_0_15px_rgba(6,182,212,0.15)] group relative cursor-help"
-            title="Formal mathematical verification vs LLM guardrail baseline (Llama-Guard / GPT Moderation)"
+            title="Measured by make bench (tests/test_cow_latency.py) on the machine that wrote contracts/benchmark_report.json"
           >
             <div className="flex items-center gap-1.5 text-xs font-mono font-bold text-cyan-300">
-              <Zap className="w-3.5 h-3.5 text-cyan-400 fill-cyan-400/30 animate-pulse" />
-              <span>{benchmark?.badge_text || "350x Faster than LLM Guardrails"}</span>
+              <Zap className="w-3.5 h-3.5 text-cyan-400 fill-cyan-400/30" />
+              <span>{benchmark?.badge_text ?? "Benchmark not measured: run make bench"}</span>
             </div>
-            <span className="text-[10px] text-emerald-400 font-mono bg-emerald-950/80 px-1.5 py-0.5 rounded border border-emerald-700/60 font-semibold">
-              {benchmark
-                ? `${benchmark.chronos_p50_latency_ms}ms vs ${benchmark.llm_guardrail_baseline_ms}ms`
-                : "4.1ms vs 1,450ms"}
-            </span>
+            {benchmark?.available && (
+              <span className="text-[10px] text-emerald-400 font-mono bg-emerald-950/80 px-1.5 py-0.5 rounded border border-emerald-700/60 font-semibold">
+                P50 {benchmark.p50_ms}ms vs {benchmark.llm_guardrail_baseline_ms}ms
+              </span>
+            )}
 
-            {/* Hover details tooltip */}
-            <div className="absolute top-full left-0 mt-1.5 hidden group-hover:flex flex-col w-64 p-2.5 rounded-lg bg-slate-950 border border-cyan-700/70 text-[10px] text-slate-300 z-50 shadow-xl space-y-1 pointer-events-none font-mono">
-              <div className="font-bold text-cyan-300 border-b border-slate-800 pb-1">
-                Formal Verification Benchmark
+            {benchmark?.available && (
+              <div className="absolute top-full left-0 mt-1.5 hidden group-hover:flex flex-col w-72 p-2.5 rounded-lg bg-slate-950 border border-cyan-700/70 text-[10px] text-slate-300 z-50 shadow-xl space-y-1 pointer-events-none font-mono">
+                <div className="font-bold text-cyan-300 border-b border-slate-800 pb-1">
+                  CoW fork + Z3 + commit/rollback, {benchmark.cycles} sequential cycles
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">P50 / P99 total:</span>
+                  <span className="text-emerald-400 font-bold">
+                    {benchmark.p50_ms}ms / {benchmark.p99_ms}ms
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">P50 CoW fork:</span>
+                  <span className="text-emerald-300 font-bold">{benchmark.fork_p50_ms}ms</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">
+                    Gate (P50 &lt; {benchmark.p50_limit_ms}ms, P99 &lt; {benchmark.p99_limit_ms}ms):
+                  </span>
+                  <span className={benchmark.gate_passed ? "text-emerald-400 font-bold" : "text-amber-400 font-bold"}>
+                    {benchmark.gate_passed ? "PASS" : "NOT MET"}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Measured on:</span>
+                  <span className="text-slate-300">{benchmark.platform}</span>
+                </div>
               </div>
-              <div className="flex justify-between">
-                <span className="text-slate-400">Chronos P50:</span>
-                <span className="text-emerald-400 font-bold">
-                  {benchmark?.chronos_p50_latency_ms || 4.14}ms
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-slate-400">Chronos P99:</span>
-                <span className="text-emerald-300 font-bold">
-                  {benchmark?.chronos_p99_latency_ms || 7.82}ms
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-slate-400">LLM Guardrail Baseline:</span>
-                <span className="text-amber-400 font-bold">
-                  {benchmark?.llm_guardrail_baseline_ms || 1450}ms
-                </span>
-              </div>
-              <div className="flex justify-between text-cyan-300 font-semibold pt-1 border-t border-slate-800">
-                <span>Speedup Multiplier:</span>
-                <span className="text-emerald-400">{benchmark?.speedup_factor || 350}x FASTER</span>
-              </div>
-            </div>
+            )}
           </div>
         </div>
 
@@ -303,32 +288,36 @@ export const TopTelemetryBar: React.FC<TopTelemetryBarProps> = ({
         {/* Action Buttons with Keyboard Pilot Badges */}
         <div className="flex items-center gap-2">
           <button
-            onClick={() => onSimulate(activeCartridge)}
-            disabled={isSimulating}
+            onClick={() => onRun(activeCartridge)}
+            disabled={isRunning}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-slate-950 font-mono font-semibold text-xs transition-colors shadow-sm"
-            title="Trigger active scenario run (Shortcut: Spacebar)"
+            title="Run the live agent scenario for this cartridge in the current kernel mode (Shortcut: Spacebar)"
           >
             <Play className="w-3 h-3 fill-current" />
-            <span>Simulate</span>
+            <span>{isRunning ? "Running..." : "Run Scenario"}</span>
             <kbd className="text-[9px] px-1.5 py-0.2 rounded bg-cyan-800 text-slate-100 font-mono font-bold">
               Space
             </kbd>
           </button>
 
           <button
-            onClick={onSimulateBypass}
-            disabled={isSimulating}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-amber-950/60 hover:bg-amber-900/60 border border-amber-600/60 text-amber-300 font-mono text-xs transition-colors"
-            title="Demonstrate catastrophic state corruption in BYPASS mode"
+            onClick={() => onRunBypass(activeCartridge)}
+            disabled={isRunning}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-amber-950/60 hover:bg-amber-900/60 border border-amber-600/60 text-amber-300 font-mono text-xs transition-colors disabled:opacity-50"
+            title="Run the same scenario with Chronos bypassed: writes straight to production (Shortcut: B)"
           >
             <AlertTriangle className="w-3 h-3 text-amber-400" />
-            <span>Bypass Attack</span>
+            <span>Run Without Chronos</span>
+            <kbd className="text-[9px] px-1 py-0.2 rounded bg-amber-900 border border-amber-700 text-amber-200 font-mono">
+              B
+            </kbd>
           </button>
 
           <button
             onClick={onReset}
+            disabled={isRunning}
             className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-slate-900 hover:bg-slate-800 border border-[#1E293B] text-slate-300 font-mono text-xs transition-colors"
-            title="Instant <200ms demo reset (POST /v1/kernel/reset) (Shortcut: Key R)"
+            title="Stage reset: reseed all cartridges, rotate the audit chain, clear compiled policies (Shortcut: Key R)"
           >
             <RotateCcw className="w-3 h-3" />
             <span className="hidden sm:inline">Reset</span>
@@ -380,11 +369,11 @@ export const TopTelemetryBar: React.FC<TopTelemetryBarProps> = ({
           </div>
         </div>
 
-        {/* Counter 3: P50 Proof Latency (ms) */}
+        {/* Counter 3: average Contract 4 total_latency_ms (fork + Z3 + resolve + audit) */}
         <div className="bg-[#0F172A]/80 px-2.5 py-1.5 rounded border border-[#1E293B]">
           <div className="text-[10px] text-cyan-400 uppercase tracking-wider flex items-center gap-1">
             <Zap className="w-3 h-3 text-cyan-400" />
-            <span>P50 Proof Latency</span>
+            <span>Avg Kernel Latency</span>
           </div>
           <div className="text-base font-bold text-cyan-300 numeral-mono">
             <AnimatedDecimal value={metrics.avgTotalLatencyMs} suffix=" ms" />

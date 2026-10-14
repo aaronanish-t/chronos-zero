@@ -2,62 +2,69 @@ import { NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
 
-export interface BenchmarkReport {
-  benchmark_title: string;
-  llm_guardrail_baseline_ms: number;
-  chronos_p50_latency_ms: number;
-  chronos_p99_latency_ms: number;
-  speedup_factor: number;
-  cow_fork_p50_ms: number;
-  z3_solve_p50_ms: number;
-  iterations: number;
+// LLM guardrail round trip the pitch compares against (1,200-2,000 ms; midpoint used).
+const LLM_GUARDRAIL_BASELINE_MS = 1450.0;
+
+export interface BenchmarkSummary {
+  available: boolean;
   badge_text: string;
-  proof_soundness: string;
+  llm_guardrail_baseline_ms: number;
+  generated_at?: string;
+  platform?: string;
+  cycles?: number;
+  p50_ms?: number;
+  p99_ms?: number;
+  fork_p50_ms?: number;
+  p50_limit_ms?: number;
+  p99_limit_ms?: number;
+  gate_passed?: boolean;
+  speedup_factor?: number;
 }
 
-const DEFAULT_BENCHMARK: BenchmarkReport = {
-  benchmark_title: "CHRONOS-ZERO Formal Kernel 500-Iteration Benchmark",
-  llm_guardrail_baseline_ms: 1450.0,
-  chronos_p50_latency_ms: 4.14,
-  chronos_p99_latency_ms: 7.82,
-  speedup_factor: 350,
-  cow_fork_p50_ms: 1.18,
-  z3_solve_p50_ms: 1.82,
-  iterations: 500,
-  badge_text: "350x Faster than LLM Guardrails",
-  proof_soundness: "100% Deterministic Z3 Formal Proof",
-};
-
+/**
+ * Summarises contracts/benchmark_report.json (written by `make bench`, tests/test_cow_latency.py).
+ * Only measured numbers are returned; with no report the badge says so instead of inventing one.
+ */
 export async function GET() {
-  // Search candidate paths for /contracts/benchmark_report.json
   const candidatePaths = [
     path.resolve(process.cwd(), "../../contracts/benchmark_report.json"),
-    path.resolve(process.cwd(), "../contracts/benchmark_report.json"),
     path.resolve(process.cwd(), "contracts/benchmark_report.json"),
-    "C:\\Users\\user\\Desktop\\chronos-zero\\contracts\\benchmark_report.json",
   ];
 
   for (const filePath of candidatePaths) {
     try {
-      if (fs.existsSync(filePath)) {
-        const raw = fs.readFileSync(filePath, "utf-8");
-        const parsed = JSON.parse(raw);
-        const baseline = Number(parsed.llm_guardrail_baseline_ms || 1450.0);
-        const p50 = Number(parsed.chronos_p50_latency_ms || parsed.total_latency_p50_ms || 4.14);
-        const speedup = Math.round(baseline / (p50 || 1));
-
-        return NextResponse.json({
-          ...DEFAULT_BENCHMARK,
-          ...parsed,
-          speedup_factor: parsed.speedup_factor || speedup || 350,
-          badge_text: `${parsed.speedup_factor || speedup || 350}x Faster than LLM Guardrails`,
-        });
-      }
+      if (!fs.existsSync(filePath)) continue;
+      const report = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+      const gate = report.gate ?? {};
+      const sequential = report.runs?.sequential ?? {};
+      const p50 = Number(gate.p50_ms);
+      if (!Number.isFinite(p50) || p50 <= 0) continue;
+      const speedup = Math.round(LLM_GUARDRAIL_BASELINE_MS / p50);
+      const summary: BenchmarkSummary = {
+        available: true,
+        badge_text: `${speedup}x faster than an LLM guardrail`,
+        llm_guardrail_baseline_ms: LLM_GUARDRAIL_BASELINE_MS,
+        generated_at: report.generated_at,
+        platform: report.environment?.platform,
+        cycles: sequential.cycles,
+        p50_ms: p50,
+        p99_ms: Number(gate.p99_ms),
+        fork_p50_ms: Number(sequential.phases?.fork_ms?.p50),
+        p50_limit_ms: Number(gate.p50_limit_ms),
+        p99_limit_ms: Number(gate.p99_limit_ms),
+        gate_passed: Boolean(gate.passed),
+        speedup_factor: speedup,
+      };
+      return NextResponse.json(summary);
     } catch {
-      // continue to next candidate
+      // unreadable report: try the next location
     }
   }
 
-  // Return calibrated default benchmark report conforming to AGENTS.md specs
-  return NextResponse.json(DEFAULT_BENCHMARK);
+  const missing: BenchmarkSummary = {
+    available: false,
+    badge_text: "Benchmark not measured: run make bench",
+    llm_guardrail_baseline_ms: LLM_GUARDRAIL_BASELINE_MS,
+  };
+  return NextResponse.json(missing);
 }
