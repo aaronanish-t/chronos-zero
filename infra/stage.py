@@ -62,7 +62,7 @@ def main() -> int:
     procs = []
     for name, cmd, cwd, port in SERVICES:
         print(f"starting {name:6} on :{port}")
-        procs.append((name, port, subprocess.Popen(cmd, cwd=cwd, env=env)))
+        procs.append((name, port, subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL)))
 
     deadline = time.time() + 90
     pending = {name: port for name, port, _ in procs}
@@ -85,7 +85,10 @@ def main() -> int:
     try:
         while all(proc.poll() is None for _, _, proc in procs):
             time.sleep(1)
-        print("a service exited; stopping the stack")
+        for name, port, proc in procs:
+            if proc.poll() is not None:
+                print(f"service '{name}' exited with code {proc.returncode}", flush=True)
+        print("a service exited; stopping the stack", flush=True)
         return stop(procs, 1)
     except KeyboardInterrupt:
         return stop(procs, 0)
