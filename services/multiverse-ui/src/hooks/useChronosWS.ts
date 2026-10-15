@@ -55,6 +55,8 @@ export interface RunStatus {
   selfHealed?: boolean;
   agentSource?: string;
   message?: string;
+  violatedRules?: string[]; // Turn 1 unsat core (real rule IDs)
+  healProofMs?: number; // Z3 proof latency of the self-healed turn
 }
 
 export interface ActivePolicy {
@@ -415,6 +417,8 @@ export function useChronosWS() {
           mode,
           selfHealed: run.self_healed,
           agentSource: run.turns.map((t) => t.agent_source).join(" / "),
+          violatedRules: (run.turns[0]?.verdict.violated_invariants ?? []).map((v) => v.rule_id),
+          healProofMs: run.turns[1]?.verdict.proof_latency_ms,
           message:
             mode === "BYPASS"
               ? "Unverified write committed to production (next run reseeds first)"

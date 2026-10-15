@@ -23,65 +23,33 @@ function RunStatusStrip({
   const isError = runStatus.phase === "ERROR";
   const isResetting = runStatus.phase === "RESETTING";
 
-  let violationPill = "DESTRUCTIVE DDL INTERCEPTED";
-  let healedPill = "SELF-HEALED IN 1.18ms";
-  let contextLog = (
+  const isDone = runStatus.phase === "DONE";
+  const violationPill = isDone
+    ? runStatus.violatedRules && runStatus.violatedRules.length > 0
+      ? `${runStatus.violatedRules.length} INVARIANT${runStatus.violatedRules.length > 1 ? "S" : ""} VIOLATED`
+      : "NO VIOLATION"
+    : "READY";
+  const healedPill = isDone
+    ? runStatus.selfHealed
+      ? `SELF-HEALED${runStatus.healProofMs != null ? ` (PROOF ${runStatus.healProofMs.toFixed(2)}ms)` : ""}`
+      : "NOT HEALED"
+    : "AWAITING RUN";
+  const contextLog = isDone ? (
     <>
-      Violation caught on Turn 1:{" "}
-      <span className="text-error font-semibold font-mono">
-        INV_OPS_04_NO_DROP_TABLE
-      </span>
-      . Intercepted query{" "}
-      <span className="text-error font-mono font-semibold">
-        &quot;DROP TABLE users CASCADE;&quot;
-      </span>
-      . Ephemeral Postgres CoW snapshot rolled back (0 bytes written, 15,420
-      user accounts preserved). Turn 2 self-healed: agent adapted to{" "}
-      <span className="text-primary font-mono font-semibold">
-        &quot;ALTER TABLE users ADD COLUMN feature_flags JSONB DEFAULT
-        &apos;{}&apos;;&quot;
-      </span>{" "}
-      → Z3 proven SAT.
+      {runStatus.violatedRules && runStatus.violatedRules.length > 0 && (
+        <>
+          Turn 1 rejected by{" "}
+          <span className="text-error font-semibold font-mono">{runStatus.violatedRules.join(", ")}</span>
+          .{" "}
+        </>
+      )}
+      {runStatus.message}
+    </>
+  ) : (
+    <>
+      {runStatus.message ?? `Press Space to run the ${activeCartridge} scenario through the kernel.`}
     </>
   );
-
-  if (activeCartridge === "FINTECH_ESCROW") {
-    violationPill = "ESCROW CAP BREACH INTERCEPTED";
-    healedPill = "SELF-HEALED IN 0.92ms";
-    contextLog = (
-      <>
-        Violation caught on Turn 1:{" "}
-        <span className="text-error font-semibold font-mono">
-          INV_FIN_01_ESCROW_CAP
-        </span>
-        . Intercepted wire transfer of{" "}
-        <span className="text-error font-mono font-semibold">$12,000.00</span> to
-        unverified vendor (cap $5,000.00). Postgres CoW transaction rolled back
-        ($12,000 capital loss prevented). Turn 2 self-healed: agent reduced wire
-        to{" "}
-        <span className="text-primary font-mono font-semibold">$400.00</span> to
-        allowlisted IBAN → Z3 proven SAT.
-      </>
-    );
-  } else if (activeCartridge === "HEALTHCARE_FHIR") {
-    violationPill = "LETHAL CONTRAINDICATION BLOCKED";
-    healedPill = "SELF-HEALED IN 1.04ms";
-    contextLog = (
-      <>
-        Violation caught on Turn 1:{" "}
-        <span className="text-error font-semibold font-mono">
-          INV_MED_01_RENAL_SAFETY
-        </span>
-        . Intercepted prescription of Metformin 2500mg for patient with eGFR{" "}
-        <span className="text-error font-mono font-semibold">
-          24 mL/min/1.73m²
-        </span>
-        . Clinical hazard blocked before medication dispensation. Turn 2
-        self-healed: agent substituted safe renal agent Linagliptin 5mg → Z3
-        proven SAT.
-      </>
-    );
-  }
 
   if (isBypass) {
     return (
@@ -124,11 +92,11 @@ function RunStatusStrip({
         </div>
         <div className="hidden lg:flex items-center gap-3 font-label-sm text-label-sm text-outline">
           <span>
-            ZK-PROOF ENGINE: <strong className="text-on-surface">Z3 v4.13.0</strong>
+            PROVER: <strong className="text-on-surface">Z3 SMT</strong>
           </span>
           <span>•</span>
           <span>
-            COW TIMEOUT: <strong className="text-on-surface">15.0ms</strong>
+            LOCK TIMEOUT: <strong className="text-on-surface">2s</strong>
           </span>
         </div>
       </div>
@@ -179,11 +147,11 @@ function RunStatusStrip({
       </div>
       <div className="hidden lg:flex items-center gap-3 font-label-sm text-label-sm text-outline">
         <span>
-          ZK-PROOF ENGINE: <strong className="text-on-surface">Z3 v4.13.0</strong>
+          PROVER: <strong className="text-on-surface">Z3 SMT</strong>
         </span>
         <span>•</span>
         <span>
-          COW TIMEOUT: <strong className="text-on-surface">15.0ms</strong>
+          LOCK TIMEOUT: <strong className="text-on-surface">2s</strong>
         </span>
       </div>
     </div>
@@ -293,7 +261,7 @@ export default function MissionControlPage() {
         currentView={currentView}
         onSelectView={handleSelectView}
         status={status}
-        latencyMs={metrics.latency_ms}
+        latencyMs={metrics.avgTotalLatencyMs}
         onOpenBenchmarks={() => setIsSplitDemoOpen(true)}
         onOpenDocs={() => {
           handleSelectView("architecture");

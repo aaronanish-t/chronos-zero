@@ -136,7 +136,7 @@ export const ArchitectureView: React.FC<ArchitectureViewProps> = ({
             <div className="flex flex-col items-center justify-center py-3.5 px-3 rounded-lg bg-surface-container-lowest/80">
               <div className="flex items-baseline gap-1">
                 <span className="font-label-lg text-label-lg text-secondary font-bold tabular-nums">
-                  340x
+                  ~300x
                 </span>
               </div>
               <span className="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wider mt-0.5">
@@ -524,7 +524,7 @@ export const ArchitectureView: React.FC<ArchitectureViewProps> = ({
                   <span className="material-symbols-outlined">terminal</span>
                 </div>
                 <span className="px-2 py-0.5 rounded bg-surface-container-high text-primary-fixed font-label-sm text-label-sm font-mono">
-                  Rule INV_OPS_04
+                  INV_OPS_01 / INV_OPS_02
                 </span>
               </div>
               <h3 className="font-headline-sm text-headline-sm text-on-surface font-semibold mb-2">

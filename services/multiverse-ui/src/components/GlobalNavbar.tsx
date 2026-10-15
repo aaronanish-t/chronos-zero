@@ -17,7 +17,7 @@ export const GlobalNavbar: React.FC<GlobalNavbarProps> = ({
   currentView,
   onSelectView,
   status,
-  latencyMs = 1.18,
+  latencyMs = 0,
   onOpenBenchmarks,
   onOpenDocs,
   onOpenSMTProver,
@@ -117,7 +117,7 @@ export const GlobalNavbar: React.FC<GlobalNavbarProps> = ({
               }`}
             >
               {status === "CONNECTED"
-                ? `Live WS: ${latencyMs > 0 ? latencyMs.toFixed(2) : "1.18"}ms`
+                ? `Live WS${latencyMs > 0 ? ` · avg kernel ${latencyMs.toFixed(2)}ms` : ""}`
                 : "Live WS: Offline"}
             </span>
           </div>
