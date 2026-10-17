@@ -293,7 +293,7 @@ export default function MissionControlPage() {
         currentView={currentView}
         onSelectView={handleSelectView}
         status={status}
-        latencyMs={metrics.latency_ms}
+        latencyMs={metrics.avgTotalLatencyMs}
         onOpenBenchmarks={() => setIsSplitDemoOpen(true)}
         onOpenDocs={() => {
           handleSelectView("architecture");

@@ -9,6 +9,9 @@ const AGENT = process.env.CHRONOS_AGENT_HTTP ?? "http://127.0.0.1:8002";
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
+  // The production image copies Next's standalone server instead of shipping
+  // the full development dependency tree.
+  output: "standalone",
   async rewrites() {
     return [
       { source: "/v1/z3/:path*", destination: `${Z3}/v1/z3/:path*` },
