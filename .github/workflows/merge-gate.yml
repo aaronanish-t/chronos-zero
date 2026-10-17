@@ -30,10 +30,22 @@ jobs:
           pip install -r services/kernel-proxy/requirements.txt
           -r services/z3-verifier/requirements.txt
           -r services/cartridges/requirements.txt
-      - name: RAM-backed PostgreSQL 16 + audit DB
-        run: docker compose up -d --wait postgres audit-db
+      - name: Persistent PostgreSQL 16 + audit DB
+        run: |
+          cp deploy/production/.env.example deploy/production/.env
+          sed -i \
+            -e 's#replace-with-a-long-random-admin-password#ci-admin-password-012345678901234567890#' \
+            -e 's#replace-with-a-long-random-application-password#ci-app-password-012345678901234567890#' \
+            -e 's#replace-with-a-long-random-api-token-at-least-32-characters#ci-api-token-012345678901234567890123456789#' \
+            -e 's#chronos.example.com#chronos.ci.example.com#g' \
+            deploy/production/.env
+          chmod 600 deploy/production/.env
+          docker compose --env-file deploy/production/.env -f deploy/production/docker-compose.yml up -d --wait postgres audit-db
       - name: Seed cartridge databases
-        run: python services/cartridges/seed_databases.py
+        run: >
+          docker compose --env-file deploy/production/.env
+          -f deploy/production/docker-compose.yml run --rm --no-deps --build agent
+          python services/cartridges/seed_databases.py
       - name: Test suite (kernel, Z3, cartridges, live stack with airplane-mode guard)
         run: python -m pytest tests -q --ignore=tests/test_cow_latency.py
       - name: Latency benchmark (report only; hardware-dependent, not a gate on CI runners)

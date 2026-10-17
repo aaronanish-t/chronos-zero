@@ -6,7 +6,7 @@ timestamp_ns is the Contract 1 timestamp of the intercepted tool call.
 
 The chain lives in its own durable Postgres server (docker-compose `audit-db`, volume-backed),
 so it survives container restarts and is out of reach of agent-supplied SQL, which only ever
-runs inside the (RAM-backed) cartridge databases. Appends are serialized with a transaction-
+runs inside the persistent cartridge databases. Appends are serialized with a transaction-
 scoped advisory lock so concurrent branches cannot fork the chain, and a trigger makes the
 table append-only. The export also carries a Merkle root over all entry hashes.
 """

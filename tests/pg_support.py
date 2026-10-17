@@ -59,7 +59,7 @@ def reset_databases() -> str:
     try:
         psycopg.connect(cartridge_dsn("CLOUD_DEVOPS"), connect_timeout=2).close()
     except psycopg.OperationalError as exc:
-        pytest.skip(f"PostgreSQL unreachable at {PG_DSN} (run `make db-up`): {exc}")
+        pytest.skip(f"PostgreSQL unreachable at {PG_DSN} (run `make up` with deploy/production/.env): {exc}")
     for cartridge_id, script in SCHEMAS.items():
         with psycopg.connect(cartridge_dsn(cartridge_id), autocommit=True) as conn:
             conn.execute(script)
@@ -74,7 +74,7 @@ def reset_audit() -> str:
             conn.execute("DROP TABLE IF EXISTS audit_chain")
             conn.execute("DROP SCHEMA IF EXISTS audit_archive CASCADE")  # chains archived by resets
     except psycopg.OperationalError as exc:
-        pytest.skip(f"audit PostgreSQL unreachable at {AUDIT_DSN} (run `make db-up`): {exc}")
+        pytest.skip(f"audit PostgreSQL unreachable at {AUDIT_DSN} (run `make up` with deploy/production/.env): {exc}")
     return AUDIT_DSN
 
 

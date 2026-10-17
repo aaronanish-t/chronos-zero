@@ -118,7 +118,7 @@ Everything done in the red-team Merge Gate sync, from the audit to a green CI on
 - `test_e2e_self_healing.py` / `test_e2e_replay.py`: updated for the $400 heal and `IF NOT EXISTS`.
 
 ### Infra / orchestration (E1)
-- `infra/stage.py`: starts kernel / Z3 / agent / UI with `OFFLINE_MODE=1`; waits for readiness; checks for `websockets`; `--offset N` shifts every port; Ctrl+C stops everything (Linux + Windows).
+- `deploy/production/docker-compose.yml`: persistent kernel / Z3 / agent / UI deployment with health checks, private networking, and Caddy as the public gateway.
 - `Makefile`: new targets `stage`, `kernel`, `z3`, `agent`, `ui`, `ui-install`, `record-replay`, `demo-verify`, `test-contracts`.
 - `.github/workflows/merge-gate.yml`: CI on every push and PR.
   - `contracts`: parity.
@@ -158,8 +158,8 @@ Everything done in the red-team Merge Gate sync, from the audit to a green CI on
 2. `pip install -r services/kernel-proxy/requirements.txt -r services/z3-verifier/requirements.txt -r services/cartridges/requirements.txt`
 3. `make ui-install` (once, with network).
 4. Optional: `make bench`, so the badge shows that laptop's numbers.
-5. `make db-up && make seed && make stage`, then open http://127.0.0.1:3000.
-   - If 8000/8001 are taken: `python infra/stage.py --offset 100`, then open :3100.
+5. Copy `deploy/production/.env.example` to `deploy/production/.env`, replace the
+   placeholders, run `make deploy-config`, then `make up` and `make seed`.
 6. With Wi-Fi off: `make demo-verify` (the airplane-mode gate).
 
 During the pitch:

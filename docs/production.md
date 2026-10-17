@@ -1,14 +1,11 @@
 # Production deployment
 
-This repository contains two distinct operating profiles:
-
-- The root `docker-compose.yml` is a disposable local/stage profile. It uses
-  tmpfs and disabled PostgreSQL durability and must not be used for customer
-  data.
-- `deploy/production/docker-compose.yml` is the deployable baseline. It uses
-  persistent PostgreSQL volumes, private service networking, non-root Python
-  and Node containers, health/readiness probes, and Caddy as the public TLS
-  gateway.
+`deploy/production/docker-compose.yml` is the repository's only Compose
+deployment profile. It uses persistent PostgreSQL volumes, private service
+networking, non-root Python and Node containers, health/readiness probes, and
+Caddy as the public TLS gateway. The former RAM-backed demo stack and stage
+launchers have been removed so the default operational path cannot destroy
+state accidentally.
 
 ## Prerequisites
 
@@ -20,16 +17,14 @@ This repository contains two distinct operating profiles:
 ## First deployment
 
 ```bash
-cd deploy/production
-cp .env.example .env
+cp deploy/production/.env.example deploy/production/.env
 # Replace every placeholder and set PUBLIC_HOSTNAME to the real DNS name.
-chmod 600 .env
-./validate.sh .env
-docker compose --env-file .env config
-docker compose --env-file .env up -d --build
+chmod 600 deploy/production/.env
+make deploy-config
+make up
 ```
 
-`validate.sh` is a non-mutating preflight. It checks secret placeholders,
+`make deploy-config` runs the non-mutating preflight. It checks secret placeholders,
 token length, HTTPS origin, env-file permissions, required Compose services,
 and Compose interpolation without printing secret-expanded configuration.
 
@@ -45,7 +40,7 @@ database. Run the seeder as an explicit operational action before enabling
 traffic:
 
 ```bash
-docker compose --env-file .env run --rm agent \
+docker compose --env-file deploy/production/.env -f deploy/production/docker-compose.yml run --rm agent \
   python services/cartridges/seed_databases.py
 ```
 
@@ -73,8 +68,8 @@ prevents an application restart from silently destroying customer state.
    identity-aware proxy/WAF in front of Caddy for user authentication and
    authorization before exposing the control plane outside a trusted network.
 6. **Updates:** build immutable image tags, run the contract, backend, live
-   stack, and UI checks in CI, then roll forward with `docker compose up -d`.
-   Never use `make db-reset` or the root demo Compose file against production.
+   stack, and UI checks in CI, then roll forward with `make up`. Never bypass
+   the production preflight or run ad-hoc destructive database commands.
 
 ## Readiness endpoints
 

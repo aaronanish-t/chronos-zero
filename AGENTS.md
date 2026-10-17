@@ -13,7 +13,7 @@ This repository is developed in parallel by 4 engineers across 4 isolated Git br
 
 | Branch / Worktree | Agent Persona | Owned Paths (READ/WRITE) | Read-Only Paths |
 | :--- | :--- | :--- | :--- |
-| `feat/e1-kernel` | `@kernel-agent` | `services/kernel-proxy/`, `contracts/`, `Makefile`, `docker-compose.yml`, `infra/postgres/`, `.env.example` | `services/z3-verifier/`, `services/cartridges/`, `services/multiverse-ui/` |
+| `feat/e1-kernel` | `@kernel-agent` | `services/kernel-proxy/`, `contracts/`, `Makefile`, `deploy/production/` | `services/z3-verifier/`, `services/cartridges/`, `services/multiverse-ui/` |
 | `feat/e2-z3-prover` | `@z3-formal-agent` | `services/z3-verifier/`, `tests/test_z3_*` | `contracts/`, `services/kernel-proxy/` |
 | `feat/e3-cartridges` | `@cartridge-agent` | `services/cartridges/`, `tests/test_e2e_*` | `contracts/`, `services/kernel-proxy/`, `services/z3-verifier/`, `infra/postgres/` |
 | `feat/e4-multiverse-ui` | `@multiverse-ui-agent` | `services/multiverse-ui/` | `contracts/` |
@@ -38,7 +38,7 @@ All inter-service communication MUST validate against Pydantic v2 (Python) and Z
 
 ### 4.1 Kernel & CoW Engine (`services/kernel-proxy/`)
 * **Storage**: All cartridge state lives in PostgreSQL 16, one database per cartridge: `chronos_healthcare_fhir`, `chronos_fintech_escrow`, `chronos_cloud_devops` (i.e. `chronos_{cartridge_id.lower()}`). Every service reads the server address from `CHRONOS_PG_DSN` (default `postgresql://chronos_kernel:chronos_kernel@127.0.0.1:5432`) and appends the database name. Use `127.0.0.1`, not `localhost`, to avoid IPv6 fallback delays.
-* **RAM-Backed Demo Server**: `docker compose up` runs Postgres with its data directory on `tmpfs` and `fsync=off`, `synchronous_commit=off`, `full_page_writes=off`. Durability is deliberately off because `make seed` rebuilds all state. Never reuse these settings or this DSN against a real database.
+* **Production Deployment**: `make up` runs `deploy/production/docker-compose.yml` with persistent PostgreSQL volumes, normal durability, private service networking, non-root application containers, and Caddy as the only public gateway. Never use disposable database settings against a real deployment.
 * **Audit Chain Storage**: The SHA-256 audit chain is the one durable store. It lives in a separate volume-backed Postgres (`audit-db`, `CHRONOS_AUDIT_DSN`, default `postgresql://chronos_kernel:chronos_kernel@127.0.0.1:5433/chronos_audit`) with normal fsync, in an append-only `audit_chain` table (UPDATE/DELETE/TRUNCATE blocked by trigger). Each entry hashes the Contract 1 `timestamp_ns`. A branch may commit only after its audit entry is written.
 * **Driver**: `psycopg` 3 (async) with one `psycopg_pool.AsyncConnectionPool` per cartridge database. No synchronous database calls inside async FastAPI routes.
 * **Connection Pinning**: PostgreSQL transactions and `SAVEPOINT`s are connection-scoped. A shadow branch MUST take a dedicated connection from the pool, run inside one `REPEATABLE READ` transaction, issue `SAVEPOINT cow_branch_X`, and pin that connection in `self._pinned[shadow_branch_id]` until resolved:
@@ -72,8 +72,9 @@ All inter-service communication MUST validate against Pydantic v2 (Python) and Z
 Run these commands from the repository root before opening any PR or calling a Merge Gate:
 
 ```bash
-# 0. Start the RAM-backed PostgreSQL 16 server (Docker) and wait until healthy
-make db-up
+# 0. Validate and start the persistent production deployment
+make deploy-config
+make up
 
 # 1. Seed all 3 cartridge databases (< 0.5s)
 make seed

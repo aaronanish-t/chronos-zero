@@ -1,9 +1,9 @@
 """Runtime configuration and production safety checks.
 
-The local stage intentionally has demo defaults. A deployable installation must
-opt into ``CHRONOS_ENV=production`` and provide explicit, non-demo connection
-strings and browser origins. This module keeps that boundary in one place so a
-service cannot silently boot with the RAM-backed demo profile in production.
+Development and test profiles may use local defaults. A deployable installation
+must opt into ``CHRONOS_ENV=production`` and provide explicit, non-demo
+connection strings and browser origins. This module keeps that boundary in one
+place so a service cannot silently boot with unsafe defaults in production.
 """
 
 from __future__ import annotations

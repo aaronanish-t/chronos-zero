@@ -5,7 +5,7 @@ every Contract 3 verdict and Contract 4 WebSocket event is validated against the
 An airplane-mode guard records any socket connection off the loopback interface; the whole
 demo must make none (OFFLINE_MODE=1, a dummy API key set to prove nothing reaches out).
 
-Run with `make demo-verify` (Postgres up: `make db-up`).
+Run with `make demo-verify` while the primary deployment is running via `make up`.
 """
 
 import socket
@@ -69,7 +69,7 @@ def seeded():
     try:
         seed_databases.seed_all()
     except psycopg.OperationalError as exc:
-        pytest.skip(f"PostgreSQL unreachable at CHRONOS_PG_DSN (run `make db-up`): {exc}")
+        pytest.skip(f"PostgreSQL unreachable at CHRONOS_PG_DSN (run `make up` with deploy/production/.env): {exc}")
     reset_audit()
 
 

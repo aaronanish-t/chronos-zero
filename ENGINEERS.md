@@ -24,7 +24,7 @@ Merge gates: **G1** H02 contract lock · **G2** H10 kernel↔Z3 sub-5 ms · **G3
 | H26–30 | Wire Fintech + Cloud DevOps cartridges into `cow_engine.py` | [ ] |
 | H30–38 | 500-call latency benchmark (`test_cow_latency.py`), tune async pool | [ ] |
 | H38–44 | Chaos tests: fast cartridge switching, malformed input, Wi-Fi kill | [ ] |
-| — | `docker-compose.yml` (RAM-backed Postgres 16), full `Makefile` (`db-up`, `seed`, `bench`) | [~] Postgres compose + `db-*`/`seed` targets done; `up`, `bench` not yet |
+| — | `deploy/production/docker-compose.yml`, production `Makefile` targets, persistent Postgres 16 | [x] Production deployment is the single supported Compose path |
 
 **Gate duties:** owns G1 merge; pairs with E2 at H06 (state keys ↔ Z3 vars) and G2.
 
