@@ -24,9 +24,14 @@ cd deploy/production
 cp .env.example .env
 # Replace every placeholder and set PUBLIC_HOSTNAME to the real DNS name.
 chmod 600 .env
+./validate.sh .env
 docker compose --env-file .env config
 docker compose --env-file .env up -d --build
 ```
+
+`validate.sh` is a non-mutating preflight. It checks secret placeholders,
+token length, HTTPS origin, env-file permissions, required Compose services,
+and Compose interpolation without printing secret-expanded configuration.
 
 Verify the public gateway and internal readiness:
 
