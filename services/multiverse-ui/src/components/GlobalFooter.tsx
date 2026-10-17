@@ -31,7 +31,7 @@ export const GlobalFooter: React.FC<GlobalFooterProps> = ({
         </div>
         <div className="flex items-center gap-space-lg">
           <span className="font-label-sm text-label-sm text-on-surface-variant font-mono">
-            POSTGRES 16 CoW • Z3 v4.13.0 SMT
+            POSTGRES 16 CoW • Z3 SMT
           </span>
           <span className="font-label-sm text-label-sm text-outline-variant font-mono">
             © 2025 CHRONOS FOUNDATION

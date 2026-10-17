@@ -144,9 +144,10 @@ function DAGCanvas({
     onSelectNode(node.data as unknown as TelemetryNode);
   };
 
+  // Kernel node ids are "node_<shadow_branch_id>"; the root and BYPASS nodes have no branch.
+  const branchOf = (id?: string) => (id && id.startsWith("node_cow_branch_") ? id.slice("node_".length) : null);
   const activeBranchId =
-    selectedNode?.shadow_branch_id ||
-    (nodes.length > 0 ? nodes[nodes.length - 1].data.shadow_branch_id : "mult_origin");
+    branchOf(selectedNode?.id) ?? branchOf(nodes[nodes.length - 1]?.id) ?? "none";
 
   return (
     <div className="relative flex-1 h-full w-full bg-surface-container-lowest overflow-hidden select-none flex flex-col bg-[radial-gradient(#1c1f29_1px,transparent_1px)] [background-size:24px_24px]">

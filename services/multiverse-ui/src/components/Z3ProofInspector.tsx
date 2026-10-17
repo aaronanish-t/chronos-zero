@@ -81,24 +81,40 @@ export const Z3ProofInspector: React.FC<Z3ProofInspectorProps> = ({
     }
   };
 
+  // Real Contract 3 data only: the first violated invariant of this node's verdict (merged in
+  // from the run), or the SAT attestation. Nothing is shown that the verifier did not produce.
+  const firstViolation = node.violated_invariants?.[0];
+  const proofPending = !node.smt2_dump && node.branch_type !== "BYPASS_CORRUPTED";
   const ruleId =
-    node.violated_rules && node.violated_rules.length > 0
-      ? node.violated_rules[0]
+    firstViolation?.rule_id ??
+    (node.violated_rules && node.violated_rules.length > 0
+      ? node.violated_rules.join(", ")
       : isRejected
-      ? "INV_OPS_04_NO_DROP_TABLE"
-      : "INV_ATTESTED_VALID";
+      ? "UNSAT"
+      : node.z3_verdict);
 
-  const fallbackAssertion = isRejected
-    ? 'match query.ast.statement { DropTable | Truncate => SIGKILL_AUTOPRUNE, _ => PROCEED_TO_COW }'
-    : 'Implies(wire_amount > 0, And(vendor_latency_ms <= 200.0, iban_allowlisted == True))';
+  const fallbackAssertion = firstViolation
+    ? firstViolation.formal_assertion
+    : proofPending
+    ? "Proof details arrive when the run completes."
+    : node.branch_type === "BYPASS_CORRUPTED"
+    ? "No proof: BYPASS mode skips the shadow branch and Z3."
+    : "All tracked invariants hold (SAT). Full formula in the SMT-LIB2 dump below.";
 
-  const fallbackWitness = isRejected
-    ? `{ statement_type: "DROP_TABLE", cascade: true, target_table: "users", affected_rows: 15420 }`
-    : `{ status: "PROVEN_SAT", invariants_checked: 3, violations: 0, delta: "additive" }`;
+  const fallbackWitness = firstViolation
+    ? firstViolation.counterexample
+    : node.violated_invariants && node.violated_invariants.length === 0 && node.z3_verdict === "SAT"
+    ? "No counterexample: the post-state satisfies every invariant."
+    : "--";
 
-  const fallbackRemediation = isRejected
-    ? "Destructive DDL is strictly forbidden on production databases. If schema migration is required, generate additive schema changes (ADD COLUMN) or execute in staging environment."
-    : "Transaction verified against formal safety criteria. Ready for deterministic commit.";
+  const fallbackRemediation = firstViolation
+    ? firstViolation.remediation_hint +
+      (node.violated_invariants && node.violated_invariants.length > 1
+        ? ` (+${node.violated_invariants.length - 1} more violated invariant(s))`
+        : "")
+    : node.z3_verdict === "SAT"
+    ? "Committed after the audit receipt was written."
+    : "--";
 
   return (
     <aside className="w-80 lg:w-[420px] bg-surface-container-low flex flex-col p-4 lg:p-6 overflow-y-auto space-y-4 border-l border-surface-container-high/60 select-none">

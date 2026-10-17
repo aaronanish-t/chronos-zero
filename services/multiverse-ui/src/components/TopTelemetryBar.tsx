@@ -53,7 +53,7 @@ function AnimatedDecimal({
 }) {
   const spring = useSpring(value, { mass: 0.8, stiffness: 75, damping: 15 });
   const display = useTransform(spring, (current) =>
-    current > 0 ? `${current.toFixed(2)}${suffix}` : "1.18ms"
+    current > 0 ? `${current.toFixed(2)}${suffix}` : "--"
   );
 
   useEffect(() => {
@@ -148,7 +148,7 @@ export const TopTelemetryBar: React.FC<TopTelemetryBarProps> = ({
                   status === "CONNECTED" ? "text-primary" : "text-error"
                 }`}
               >
-                {status === "CONNECTED" ? "Live WS (1.2ms)" : "WS Disconnected"}
+                {status === "CONNECTED" ? "Live WS" : "WS Disconnected"}
               </span>
             </div>
           </div>
@@ -160,7 +160,7 @@ export const TopTelemetryBar: React.FC<TopTelemetryBarProps> = ({
             <span className="font-label-sm text-label-sm font-semibold tracking-wider">
               {benchmark && benchmark.speedup_factor
                 ? `${benchmark.speedup_factor.toFixed(0)}x VS LLM GUARDRAILS`
-                : "340x VS LLM GUARDRAILS"}
+                : "BENCHMARK: RUN make bench"}
             </span>
           </div>
 
@@ -367,12 +367,8 @@ export const TopTelemetryBar: React.FC<TopTelemetryBarProps> = ({
           </span>
           <span className="font-label-lg text-label-lg font-bold text-error tabular-nums tracking-tight mt-0.5">
             <AnimatedInteger
-              value={
-                activeCartridge === "CLOUD_DEVOPS" && metrics.unsatRollbacks > 0
-                  ? metrics.unsatRollbacks
-                  : 1
-              }
-              suffix=" WIPE PREVENTED"
+              value={metrics.unsatRollbacks}
+              suffix=" BLOCKED"
             />
           </span>
         </div>
