@@ -13,6 +13,7 @@ than a valid SAT/UNSAT verdict for this branch, the shadow branch is rolled back
 from __future__ import annotations
 
 import asyncio
+import hmac
 import importlib.util
 import logging
 import os
@@ -31,6 +32,7 @@ from psycopg import errors as pg_errors
 from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.concurrency import run_in_threadpool
+from starlette.responses import JSONResponse
 
 REPO_ROOT = str(Path(__file__).resolve().parents[2])
 if REPO_ROOT not in sys.path:
@@ -47,8 +49,10 @@ from contracts.schemas import (  # noqa: E402
 from cow_engine import CARTRIDGE_HANDLERS, CARTRIDGE_IDS, CoWBranchEngine  # noqa: E402
 from crypto_audit import AuditChain  # noqa: E402
 from saga_ledger import SagaLedger  # noqa: E402
+from services.runtime_config import load_config  # noqa: E402
 
-Z3_VERIFY_URL = os.environ.get("CHRONOS_Z3_URL", "http://127.0.0.1:8001/v1/z3/verify")
+RUNTIME_CONFIG = load_config()
+Z3_VERIFY_URL = RUNTIME_CONFIG.z3_url
 Z3_TIMEOUT_S = 2.0
 ROOT_NODE_ID = "node_root"
 MONEY_ARG_KEYS = ("claim_amount_usd", "amount_usd")
@@ -190,7 +194,8 @@ async def _run_engine(call: Awaitable[Any]) -> Any:
 
 
 async def _verify(client: httpx.AsyncClient, url: str, diff: StateDiffRequest) -> Z3VerdictResponse:
-    response = await client.post(url, json=diff.model_dump(mode="json"))
+    headers = {"X-Chronos-Api-Key": RUNTIME_CONFIG.api_token} if RUNTIME_CONFIG.api_token else None
+    response = await client.post(url, json=diff.model_dump(mode="json"), headers=headers)
     response.raise_for_status()
     verdict = Z3VerdictResponse.model_validate(response.json())
     if verdict.trace_id != diff.trace_id or verdict.shadow_branch_id != diff.shadow_branch_id:
@@ -249,6 +254,14 @@ def create_app(
         allow_methods=["GET", "POST"],
         allow_headers=["Content-Type", "Accept"],
     )
+
+    @app.middleware("http")
+    async def production_api_auth(request, call_next):
+        if RUNTIME_CONFIG.production and request.url.path.startswith("/v1/"):
+            supplied = request.headers.get("x-chronos-api-key", "")
+            if not RUNTIME_CONFIG.api_token or not hmac.compare_digest(supplied, RUNTIME_CONFIG.api_token):
+                return JSONResponse({"detail": "authentication required"}, status_code=401)
+        return await call_next(request)
     app.state.engine = engine
     app.state.hub = hub
     app.state.audit = audit
@@ -511,6 +524,11 @@ def create_app(
 
     @app.websocket("/ws/telemetry")
     async def telemetry(ws: WebSocket) -> None:
+        if RUNTIME_CONFIG.production:
+            supplied = ws.headers.get("x-chronos-api-key", "") or ws.query_params.get("token", "")
+            if not RUNTIME_CONFIG.api_token or not hmac.compare_digest(supplied, RUNTIME_CONFIG.api_token):
+                await ws.close(code=1008, reason="authentication required")
+                return
         await hub.connect(ws)
         try:
             while True:
@@ -536,5 +554,15 @@ def create_app(
             "telemetry_clients": hub.client_count,
             "z3_verify_url": z3_verify_url,
         }
+
+    @app.get("/readyz")
+    async def readyz() -> dict[str, Any]:
+        """Kubernetes/load-balancer readiness: all stateful dependencies are reachable."""
+        try:
+            await engine.check_ready()
+            await audit.check_ready()
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"kernel dependencies unavailable: {exc}") from exc
+        return {"status": "ready", "service": "chronos-kernel-proxy"}
 
     return app

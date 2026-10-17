@@ -10,7 +10,12 @@ import time
 
 import psycopg
 
-PG_DSN = os.environ.get("CHRONOS_PG_DSN", "postgresql://chronos_kernel:chronos_kernel@127.0.0.1:5432").rstrip("/")
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+from services.runtime_config import load_config
+
+PG_DSN = load_config().pg_dsn.rstrip("/")
 
 USER_COUNT = 15_420
 ROLES = ("viewer", "editor", "admin")

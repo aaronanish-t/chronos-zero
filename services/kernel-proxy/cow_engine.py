@@ -17,7 +17,12 @@ from psycopg import AsyncConnection, IsolationLevel, sql
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-DEFAULT_PG_DSN = "postgresql://chronos_kernel:chronos_kernel@127.0.0.1:5432"
+try:
+    from services.runtime_config import load_config
+except ModuleNotFoundError:  # runnable directly from services/kernel-proxy
+    from runtime_config import load_config
+
+DEFAULT_PG_DSN = load_config().pg_dsn
 CARTRIDGE_IDS = ("HEALTHCARE_FHIR", "FINTECH_ESCROW", "CLOUD_DEVOPS")
 # Pre-warmed so a burst of branches does not pay connection setup; 3 pools x 24 stays well
 # under the demo server's max_connections=100.
@@ -79,6 +84,12 @@ class CoWBranchEngine:
         # wait=False: the kernel starts even if Postgres is still booting; requests then fail closed.
         for pool in self._pools.values():
             await pool.open(wait=False)
+
+    async def check_ready(self) -> None:
+        """Verify every cartridge pool can reach PostgreSQL before serving traffic."""
+        for pool in self._pools.values():
+            async with pool.connection(timeout=POOL_GETCONN_TIMEOUT_S) as conn:
+                await conn.execute("SELECT 1")
 
     async def close(self) -> None:
         await self.rollback_all()

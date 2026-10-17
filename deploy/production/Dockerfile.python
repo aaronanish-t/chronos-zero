@@ -1,0 +1,24 @@
+FROM python:3.12-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+RUN addgroup --system chronos && adduser --system --ingroup chronos chronos
+WORKDIR /app
+
+COPY services/kernel-proxy/requirements.txt /tmp/kernel-requirements.txt
+COPY services/z3-verifier/requirements.txt /tmp/z3-requirements.txt
+COPY services/cartridges/requirements.txt /tmp/cartridge-requirements.txt
+RUN pip install --no-cache-dir \
+    -r /tmp/kernel-requirements.txt \
+    -r /tmp/z3-requirements.txt \
+    -r /tmp/cartridge-requirements.txt
+
+COPY contracts ./contracts
+COPY services ./services
+COPY tests/contract_validator.py ./tests/contract_validator.py
+RUN chown -R chronos:chronos /app
+USER chronos
+
+EXPOSE 8000 8001 8002

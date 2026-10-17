@@ -7,6 +7,7 @@ for speculative Copy-on-Write shadow branches with sub-2.5ms latency.
 from __future__ import annotations
 
 import os
+import hmac
 import re
 import sys
 import threading
@@ -17,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, Literal, Optional
 
 from fastapi import FastAPI
+from starlette.responses import JSONResponse
 from pydantic import BaseModel, Field
 import uvicorn
 import httpx
@@ -41,6 +43,9 @@ from prover_core import (  # noqa: E402
     prewarm_solvers,
 )
 import nl_compiler  # noqa: E402
+from services.runtime_config import validate_production_config  # noqa: E402
+
+RUNTIME_CONFIG = validate_production_config()
 
 # Z3's Python API shares one global context, which is not thread-safe: concurrent solvers on
 # FastAPI's worker threads crash the process (ASSERTION VIOLATION / access violation). Every
@@ -95,6 +100,15 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def production_api_auth(request, call_next):
+    if RUNTIME_CONFIG.production and request.url.path.startswith("/v1/"):
+        supplied = request.headers.get("x-chronos-api-key", "")
+        if not RUNTIME_CONFIG.api_token or not hmac.compare_digest(supplied, RUNTIME_CONFIG.api_token):
+            return JSONResponse({"detail": "authentication required"}, status_code=401)
+    return await call_next(request)
 
 
 @app.post(
@@ -165,7 +179,8 @@ def _notify_policy_compiled(result: PolicyCompileResponse) -> None:
     }
     try:
         with httpx.Client(timeout=0.25) as client:
-            client.post(KERNEL_POLICY_EVENT_URL, json=event).raise_for_status()
+            headers = {"X-Chronos-Api-Key": RUNTIME_CONFIG.api_token} if RUNTIME_CONFIG.api_token else None
+            client.post(KERNEL_POLICY_EVENT_URL, json=event, headers=headers).raise_for_status()
     except httpx.HTTPError as exc:
         # The verifier is independently useful; a missing kernel only means
         # there is no UI stream to receive this optional event yet.
@@ -199,7 +214,22 @@ def health() -> Dict[str, Any]:
     }
 
 
+@app.get("/livez")
+def livez() -> Dict[str, str]:
+    return {"status": "alive", "service": "chronos-z3-verifier"}
+
+
+@app.get("/readyz")
+def readyz() -> Dict[str, Any]:
+    metrics = get_solver_metrics()
+    if metrics["prewarm_failures"]:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=503, detail={"status": "not_ready", **metrics})
+    return {"status": "ready", "service": "chronos-z3-verifier", **metrics}
+
+
 if __name__ == "__main__":
     # Loopback only, like the kernel: nothing on the venue network can reach the prover, and
     # Windows does not raise a firewall prompt mid-demo.
-    uvicorn.run(app, host="127.0.0.1", port=int(os.environ.get("CHRONOS_Z3_PORT", "8001")))
+    uvicorn.run(app, host=RUNTIME_CONFIG.bind_host, port=RUNTIME_CONFIG.z3_port)

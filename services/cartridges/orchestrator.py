@@ -7,10 +7,13 @@ the agent reads the safe recovery record from the cartridge DB, and Turn 2 re-su
 Run: python services/cartridges/orchestrator.py   (serves POST /v1/agent/run-scenario on :8002)
 """
 import asyncio
+import hmac
 import json
 import os
+import sys
 import time
 import uuid
+from pathlib import Path
 from typing import Literal, Optional
 
 import httpx
@@ -18,11 +21,18 @@ import psycopg
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from starlette.responses import JSONResponse
 
 from replay_middleware import DeterministicReplayMiddleware, ReplayMiss
 from scenarios import SCENARIOS
 from scenarios.judge_policies import match_policy, scenario_key
 from seed_databases import db_dsn
+REPO_ROOT = str(Path(__file__).resolve().parents[2])
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+from services.runtime_config import validate_production_config
+
+RUNTIME_CONFIG = validate_production_config()
 
 # 127.0.0.1, not localhost: the kernel binds IPv4 loopback only, and resolving localhost to ::1
 # first adds a refused-connection retry to every new connection (AGENTS.md section 4.1).
@@ -89,7 +99,8 @@ class ChronosAgentRunner:
             "tool_call": tool_call,
         }
         self.messages.append({"role": "assistant", "tool_call": tool_call})
-        resp = await client.post(KERNEL_URL, json=payload, timeout=10.0)
+        headers = {"X-Chronos-Api-Key": RUNTIME_CONFIG.api_token} if RUNTIME_CONFIG.api_token else None
+        resp = await client.post(KERNEL_URL, json=payload, headers=headers, timeout=10.0)
         resp.raise_for_status()
         verdict = resp.json()
         self.messages.append({"role": "tool", "content": verdict})
@@ -136,6 +147,14 @@ class RunScenarioRequest(BaseModel):
 
 
 app = FastAPI(title="Chronos-Zero Agent Orchestrator")
+@app.middleware("http")
+async def production_api_auth(request, call_next):
+    if RUNTIME_CONFIG.production and request.url.path.startswith("/v1/"):
+        supplied = request.headers.get("x-chronos-api-key", "")
+        if not RUNTIME_CONFIG.api_token or not hmac.compare_digest(supplied, RUNTIME_CONFIG.api_token):
+            return JSONResponse({"detail": "authentication required"}, status_code=401)
+    return await call_next(request)
+
 # The Next.js UI calls this from the browser, on a different port.
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
                    allow_methods=["POST"], allow_headers=["Content-Type"])
@@ -157,11 +176,29 @@ async def run_scenario(req: RunScenarioRequest) -> dict:
         raise HTTPException(status_code=500, detail=f"cartridge DB not ready (run seed_databases.py): {exc}")
 
 
+@app.get("/livez")
+async def livez() -> dict[str, str]:
+    return {"status": "alive", "service": "chronos-agent-orchestrator"}
+
+
+@app.get("/readyz")
+async def readyz() -> dict[str, str]:
+    try:
+        async with await psycopg.AsyncConnection.connect(
+            db_dsn("HEALTHCARE_FHIR"), connect_timeout=3
+        ) as conn:
+            await conn.execute("SELECT 1")
+    except psycopg.Error as exc:
+        raise HTTPException(status_code=503, detail=f"cartridge database unavailable: {exc}") from exc
+    return {"status": "ready", "service": "chronos-agent-orchestrator"}
+
+
 if __name__ == "__main__":
     import uvicorn
 
     # uvicorn picks the Proactor loop on Windows, which async psycopg can't use.
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=int(os.environ.get("CHRONOS_AGENT_PORT", "8002"))))
+    config = validate_production_config()
+    server = uvicorn.Server(uvicorn.Config(app, host=config.bind_host, port=config.agent_port))
     if os.name == "nt":
         with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
             runner.run(server.serve())

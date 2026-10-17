@@ -1,0 +1,155 @@
+name: chronos-zero-production
+
+services:
+  postgres:
+    image: postgres:16.4-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_ADMIN_USER:?set POSTGRES_ADMIN_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?set POSTGRES_ADMIN_PASSWORD}
+      POSTGRES_DB: postgres
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:?set POSTGRES_APP_PASSWORD}
+    volumes:
+      - chronos-cartridge-data:/var/lib/postgresql/data
+      - ./postgres-app-init.sh:/docker-entrypoint-initdb.d/01-init.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [backend]
+
+  audit-db:
+    image: postgres:16.4-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_ADMIN_USER:?set POSTGRES_ADMIN_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?set POSTGRES_ADMIN_PASSWORD}
+      POSTGRES_DB: postgres
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:?set POSTGRES_APP_PASSWORD}
+    volumes:
+      - chronos-audit-data:/var/lib/postgresql/data
+      - ./postgres-audit-init.sh:/docker-entrypoint-initdb.d/01-init.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [backend]
+
+  kernel:
+    build:
+      context: ../..
+      dockerfile: deploy/production/Dockerfile.python
+    restart: unless-stopped
+    command: ["python", "services/kernel-proxy/main.py"]
+    environment: &service-env
+      CHRONOS_ENV: production
+      CHRONOS_BIND_HOST: 0.0.0.0
+      CHRONOS_PG_DSN: postgresql://chronos_app:${POSTGRES_APP_PASSWORD}@postgres:5432
+      CHRONOS_AUDIT_DSN: postgresql://chronos_app:${POSTGRES_APP_PASSWORD}@audit-db:5432/chronos_audit
+      CHRONOS_CORS_ORIGINS: ${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN}
+      CHRONOS_Z3_URL: http://z3:8001/v1/z3/verify
+      CHRONOS_KERNEL_URL: http://kernel:8000
+      CHRONOS_KERNEL_POLICY_EVENT_URL: http://kernel:8000/v1/kernel/telemetry/policy-compiled
+      CHRONOS_API_TOKEN: ${CHRONOS_API_TOKEN:?set CHRONOS_API_TOKEN}
+    depends_on:
+      postgres: { condition: service_healthy }
+      audit-db: { condition: service_healthy }
+      z3: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz')"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [backend]
+
+  z3:
+    build:
+      context: ../..
+      dockerfile: deploy/production/Dockerfile.python
+    restart: unless-stopped
+    command: ["python", "services/z3-verifier/server.py"]
+    environment:
+      <<: *service-env
+      CHRONOS_Z3_PORT: 8001
+    depends_on:
+      postgres: { condition: service_healthy }
+      audit-db: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/readyz')"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [backend]
+
+  agent:
+    build:
+      context: ../..
+      dockerfile: deploy/production/Dockerfile.python
+    restart: unless-stopped
+    command: ["python", "services/cartridges/orchestrator.py"]
+    environment:
+      <<: *service-env
+      CHRONOS_AGENT_PORT: 8002
+      CHRONOS_KERNEL_URL: http://kernel:8000
+    depends_on:
+      kernel: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/readyz')"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [backend]
+
+  ui:
+    build:
+      context: ../..
+      dockerfile: deploy/production/Dockerfile.ui
+      args:
+        NEXT_PUBLIC_CHRONOS_WS_URL: wss://${PUBLIC_HOSTNAME:?set PUBLIC_HOSTNAME}/ws/telemetry
+    restart: unless-stopped
+    environment:
+      CHRONOS_KERNEL_HTTP: http://kernel:8000
+      CHRONOS_Z3_HTTP: http://z3:8001
+      CHRONOS_AGENT_HTTP: http://agent:8002
+    depends_on:
+      kernel: { condition: service_healthy }
+      z3: { condition: service_healthy }
+      agent: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [backend]
+
+  gateway:
+    image: caddy:2.9-alpine
+    restart: unless-stopped
+    environment:
+      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME:?set PUBLIC_HOSTNAME}
+      CHRONOS_API_TOKEN: ${CHRONOS_API_TOKEN:?set CHRONOS_API_TOKEN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      ui: { condition: service_healthy }
+      kernel: { condition: service_healthy }
+      z3: { condition: service_healthy }
+      agent: { condition: service_healthy }
+    networks: [backend]
+
+volumes:
+  chronos-cartridge-data:
+  chronos-audit-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  backend:
+    driver: bridge

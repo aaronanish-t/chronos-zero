@@ -23,8 +23,13 @@ from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+try:
+    from services.runtime_config import load_config
+except ModuleNotFoundError:  # runnable directly from services/kernel-proxy
+    from runtime_config import load_config
+
 GENESIS_HASH = "0" * 64
-DEFAULT_AUDIT_DSN = "postgresql://chronos_kernel:chronos_kernel@127.0.0.1:5433/chronos_audit"
+DEFAULT_AUDIT_DSN = load_config().audit_dsn
 _SEP = "\x1f"
 _APPEND_LOCK_KEY = 0x43485A0  # arbitrary constant: one chain, one writer at a time
 _GETCONN_TIMEOUT_S = 2.0
@@ -133,6 +138,12 @@ class AuditChain:
 
     async def close(self) -> None:
         await self._pool.close()
+
+    async def check_ready(self) -> None:
+        """Verify the durable audit database and append-only schema are available."""
+        await self._ensure_schema()
+        async with self._pool.connection(timeout=_GETCONN_TIMEOUT_S) as conn:
+            await conn.execute("SELECT 1")
 
     async def _ensure_schema(self) -> None:
         # Lazy: the kernel may start before Postgres is accepting connections.

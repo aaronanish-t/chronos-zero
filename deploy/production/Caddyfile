@@ -1,0 +1,28 @@
+{$PUBLIC_HOSTNAME} {
+    encode zstd gzip
+
+    @telemetry path /ws/*
+    reverse_proxy @telemetry kernel:8000 {
+        header_up X-Chronos-Api-Key {$CHRONOS_API_TOKEN}
+    }
+
+    @z3 path /v1/z3/*
+    reverse_proxy @z3 z3:8001 {
+        header_up X-Chronos-Api-Key {$CHRONOS_API_TOKEN}
+    }
+
+    @agent path /v1/agent/*
+    reverse_proxy @agent agent:8002 {
+        header_up X-Chronos-Api-Key {$CHRONOS_API_TOKEN}
+    }
+
+    @kernel path /v1/*
+    reverse_proxy @kernel kernel:8000 {
+        header_up X-Chronos-Api-Key {$CHRONOS_API_TOKEN}
+    }
+
+    @readiness path /readyz
+    reverse_proxy @readiness kernel:8000
+
+    reverse_proxy ui:3000
+}
