@@ -16,6 +16,7 @@ Production deployment baseline:
 - `services/cartridges/` — PostgreSQL seeding, deterministic offline replay, and one-turn self-healing orchestration
 - `services/multiverse-ui/` — live Multiverse DAG, proof inspector, split comparison, and policy studio
 - `deploy/production/` — persistent PostgreSQL 16, private service network, non-root containers, and Caddy TLS gateway
+- `deploy/demo/` — offline stage demo: RAM-backed PostgreSQL on 127.0.0.1 and a one-command launcher (no internet needed)
 - `tests/` — contract, invariant, CoW, latency, self-healing, and offline live-stack gates
 
 The tracked stage gate is `P50 < 3.5ms` and `P99 < 8.0ms` for 500 sequential CoW + Z3 cycles.
@@ -37,3 +38,11 @@ make bench
 production environment, builds the images, and starts the persistent stack.
 See [docs/production.md](docs/production.md) for TLS, backups, upgrades, and
 operational requirements.
+
+## Offline stage demo
+
+```bash
+make demo-up && make demo-seed && make stage
+```
+
+Runs the whole demo on one laptop with Wi-Fi off. See [docs/demo.md](docs/demo.md).
