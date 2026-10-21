@@ -6,6 +6,8 @@ POST /v1/kernel/reset                 One-click stage reset: reseed, clear DAG h
 GET  /v1/kernel/audit-log             The verifiable SHA-256 audit chain.
 WS   /ws/telemetry                    Contract 4 events for the Multiverse UI.
 
+With CHRONOS_ENV=production, BYPASS is refused (403) and the two stage-only routes are not registered.
+
 ACTIVE mode fails closed: if the Z3 verifier is unreachable, errors, or returns anything other
 than a valid SAT/UNSAT verdict for this branch, the shadow branch is rolled back.
 """
@@ -384,8 +386,13 @@ def create_app(
         ))
         return verdict
 
+    # Stage-only routes reseed production or run BYPASS, so a production kernel never registers them.
+    stage_route = (lambda path: lambda fn: fn) if RUNTIME_CONFIG.production else app.post
+
     @app.post("/v1/kernel/execute")
     async def execute(req: InterceptRequest) -> dict[str, Any]:
+        if req.chronos_mode == "BYPASS" and RUNTIME_CONFIG.production:
+            raise HTTPException(status_code=403, detail="BYPASS mode is disabled in production")
         async with gate.work():
             if req.chronos_mode == "BYPASS":
                 return await _execute_bypass(req, timeline=req.agent_id)
@@ -399,7 +406,7 @@ def create_app(
         await hub.broadcast(event)
         return {"status": "BROADCAST", "event_type": event.event_type}
 
-    @app.post("/v1/kernel/run-split-comparison")
+    @stage_route("/v1/kernel/run-split-comparison")
     async def run_split_comparison(req: SplitComparisonRequest) -> dict[str, Any]:
         """Run the same steps through BYPASS and ACTIVE at the same time for the stage split screen.
 
@@ -469,7 +476,7 @@ def create_app(
                 "total_latency_ms": _elapsed_ms(t0),
             }
 
-    @app.post("/v1/kernel/reset")
+    @stage_route("/v1/kernel/reset")
     async def reset() -> dict[str, Any]:
         """One-click stage reset: reseed all cartridges, clear DAG history, rotate the audit chain."""
         if "seed_all" not in seeder:

@@ -1,6 +1,25 @@
 {$PUBLIC_HOSTNAME} {
     encode zstd gzip
 
+    # The gateway attaches the service token below, so it must only do that for a signed-in operator.
+    @protected not path /readyz
+    basic_auth @protected {
+        {$CHRONOS_UI_USER} {$CHRONOS_UI_PASSWORD_HASH}
+    }
+
+    # Browsers resend that sign-in on their own, so refuse API calls another site starts (CSRF).
+    @cross_site {
+        path /v1/* /ws/*
+        header_regexp Sec-Fetch-Site ^(cross-site|same-site)$
+    }
+    respond @cross_site 403
+    @foreign_origin {
+        path /v1/* /ws/*
+        header Origin *
+        not header Origin {$PUBLIC_ORIGIN}
+    }
+    respond @foreign_origin 403
+
     @telemetry path /ws/*
     reverse_proxy @telemetry kernel:8000 {
         header_up X-Chronos-Api-Key {$CHRONOS_API_TOKEN}
