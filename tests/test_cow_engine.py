@@ -127,7 +127,10 @@ def migrate(sql):
     "SELECT set_config('statement_timeout', '0', false)",
     'SELECT "pg_terminate_backend"(42)',
     "SELECT pg_advisory_lock(1)",
-    "SELECT U&\"\0073et_config\"('lock_timeout', '0', false)",
+    r"""SELECT U&"\0073et_config"('lock_timeout', '0', false)""",
+    "SELECT set_config/**/('statement_timeout','0',false)",
+    "SELECT pg_catalog.set_config /* x */ ('lock_timeout','0',false)",
+    "SELECT pg_terminate_backend--x\n(42)",
     "ALTER ROLE chronos_kernel SET statement_timeout = 0",
 ])
 def test_run_migration_rejects_sql_that_escapes_the_shadow_branch(sql):

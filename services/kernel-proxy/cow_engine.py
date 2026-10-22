@@ -417,7 +417,7 @@ _FORBIDDEN_SQL = re.compile(
 # shortcut: a name denylist misses dynamic SQL (e.g. query_to_xml); upgrade to a non-owner execution role.
 _FORBIDDEN_FUNCTIONS = re.compile(
     r"\b(set_config|pg_terminate_backend|pg_cancel_backend|dblink\w*"
-    r"|pg_(try_)?advisory_lock\w*|pg_advisory_unlock\w*)\s*\(|\bu&",
+    r"|pg_(try_)?advisory_lock\w*|pg_advisory_unlock\w*)\b|\bu&",  # bare names: a comment may sit before "("
     re.IGNORECASE,
 )
 _LINE_END = re.compile(r"[\r\n]")  # a -- comment ends at either, as in Postgres
