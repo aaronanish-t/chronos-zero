@@ -408,10 +408,19 @@ _FORBIDDEN_SQL = re.compile(
     r"^\s*("
     r"BEGIN|START\s+TRANSACTION|COMMIT|END|ABORT|ROLLBACK|SAVEPOINT|RELEASE|PREPARE\s+TRANSACTION"
     r"|SET(?!\s+LOCAL\b)|RESET|DISCARD|COPY|DO|CREATE\s+DATABASE|DROP\s+DATABASE|ALTER\s+SYSTEM"
-    r"|VACUUM|CHECKPOINT|LISTEN|UNLISTEN|NOTIFY"
+    r"|VACUUM|CHECKPOINT|LISTEN|UNLISTEN|NOTIFY|ALTER\s+(ROLE|USER|DATABASE)"
     r")\b",
     re.IGNORECASE,
 )
+# Functions whose effects outlive or bypass this branch: session settings, other backends,
+# other connections, session-level advisory locks. U& names could spell any of them in escapes.
+# shortcut: a name denylist misses dynamic SQL (e.g. query_to_xml); upgrade to a non-owner execution role.
+_FORBIDDEN_FUNCTIONS = re.compile(
+    r"\b(set_config|pg_terminate_backend|pg_cancel_backend|dblink\w*"
+    r"|pg_(try_)?advisory_lock\w*|pg_advisory_unlock\w*)\b|\bu&",  # bare names: a comment may sit before "("
+    re.IGNORECASE,
+)
+_LINE_END = re.compile(r"[\r\n]")  # a -- comment ends at either, as in Postgres
 # In a sandbox copy, a schema-qualified name would reach past the copy into production.
 _QUALIFIED_PUBLIC = re.compile(r"\b(public|pg_temp)\s*\.", re.IGNORECASE)
 
@@ -439,15 +448,39 @@ async def read_devops_state(conn: AsyncConnection, tool_call: dict[str, Any]) ->
     }
 
 
+def _skip_leading_comments(statement: str) -> str:
+    """Drop the whitespace and comments Postgres skips before the first keyword (block comments nest)."""
+    i, n = 0, len(statement)  # one pass by index: slicing per comment would be quadratic in agent input
+    while True:
+        while i < n and statement[i].isspace():
+            i += 1
+        if statement.startswith("--", i):
+            end = _LINE_END.search(statement, i)
+            i = end.end() if end else n
+        elif statement.startswith("/*", i):
+            depth, i = 1, i + 2
+            while depth and i < n:
+                if statement.startswith("/*", i):
+                    depth, i = depth + 1, i + 2
+                elif statement.startswith("*/", i):
+                    depth, i = depth - 1, i + 2
+                else:
+                    i += 1
+        else:
+            return statement[i:]
+
+
 async def run_migration(conn: AsyncConnection, tool_call: dict[str, Any]) -> None:
     # One statement per execute(), so nothing can hide a second statement behind a ';'.
     for statement in (s.strip() for s in tool_call["arguments"]["sql"].split(";")):
         if not statement:
             continue
-        if _FORBIDDEN_SQL.match(statement):
-            raise PermissionError(
-                f"'{statement.split()[0].upper()}' is not allowed inside a shadow branch"
-            )
+        head = _skip_leading_comments(statement)
+        if _FORBIDDEN_SQL.match(head):
+            raise PermissionError(f"'{head.split()[0].upper()}' is not allowed inside a shadow branch")
+        # Quoted identifiers ("set_config") call the same function, so match with the quotes removed.
+        if _FORBIDDEN_FUNCTIONS.search(statement.replace('"', "")):
+            raise PermissionError("functions that act outside the shadow branch are not allowed")
         if tool_call.get("sandbox_schema") and _QUALIFIED_PUBLIC.search(statement):
             raise PermissionError("schema-qualified names are not allowed inside a sandbox copy")
         await conn.execute(statement)

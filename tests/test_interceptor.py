@@ -1,3 +1,4 @@
+import dataclasses
 import hashlib
 import json
 
@@ -319,3 +320,31 @@ def test_contract_1_validation_422(db_dir):
     bad["cartridge_id"] = "CRYPTO"
     with make_client(FakeVerifier()) as client:
         assert client.post("/v1/kernel/execute", json=bad).status_code == 422
+
+
+def production_client(monkeypatch):
+    """A kernel built with CHRONOS_ENV=production. The lifespan never runs, so no database is needed."""
+    import interceptor
+
+    token = "t" * 32
+    monkeypatch.setattr(interceptor, "RUNTIME_CONFIG", dataclasses.replace(
+        interceptor.RUNTIME_CONFIG, environment="production", api_token=token))
+    client = TestClient(create_app(transport=httpx.MockTransport(FakeVerifier())))
+    client.headers["X-Chronos-Api-Key"] = token
+    return client
+
+
+def test_production_refuses_bypass(monkeypatch):
+    r = production_client(monkeypatch).post("/v1/kernel/execute", json=payload(
+        "CLOUD_DEVOPS", "run_migration", "Database/prod", {"sql": "DROP TABLE users CASCADE"}, mode="BYPASS"))
+    assert r.status_code == 403
+    assert "BYPASS" in r.json()["detail"]
+
+
+def test_production_does_not_register_stage_routes(monkeypatch):
+    development_paths = {route.path for route in create_app().routes}
+    production_paths = {route.path for route in production_client(monkeypatch).app.routes}
+    for path in ("/v1/kernel/reset", "/v1/kernel/run-split-comparison"):
+        assert path in development_paths
+        assert path not in production_paths
+    assert "/v1/kernel/execute" in production_paths

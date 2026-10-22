@@ -39,7 +39,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
   key="${BASH_REMATCH[1]}"
   value="${BASH_REMATCH[2]}"
   case "$key" in
-    POSTGRES_ADMIN_USER|POSTGRES_ADMIN_PASSWORD|POSTGRES_APP_PASSWORD|CHRONOS_API_TOKEN|PUBLIC_HOSTNAME|PUBLIC_ORIGIN) ;;
+    POSTGRES_ADMIN_USER|POSTGRES_ADMIN_PASSWORD|POSTGRES_APP_PASSWORD|CHRONOS_API_TOKEN|PUBLIC_HOSTNAME|PUBLIC_ORIGIN|CHRONOS_UI_USER|CHRONOS_UI_PASSWORD_HASH) ;;
     *) die "unsupported dotenv key: $key" ;;
   esac
   [[ -z "${seen_keys[$key]+x}" ]] || die "duplicate dotenv key: $key"
@@ -47,7 +47,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
   printf -v "$key" '%s' "$value"
 done < "$ENV_FILE"
 
-for name in POSTGRES_ADMIN_USER POSTGRES_ADMIN_PASSWORD POSTGRES_APP_PASSWORD CHRONOS_API_TOKEN PUBLIC_HOSTNAME PUBLIC_ORIGIN; do
+for name in POSTGRES_ADMIN_USER POSTGRES_ADMIN_PASSWORD POSTGRES_APP_PASSWORD CHRONOS_API_TOKEN PUBLIC_HOSTNAME PUBLIC_ORIGIN CHRONOS_UI_USER CHRONOS_UI_PASSWORD_HASH; do
   [[ -n "${!name:-}" ]] || die "$name is required"
 done
 
@@ -60,6 +60,10 @@ done
 (( ${#CHRONOS_API_TOKEN} >= 32 )) || die "CHRONOS_API_TOKEN must be at least 32 characters"
 [[ "$PUBLIC_ORIGIN" == https://* ]] || die "PUBLIC_ORIGIN must use HTTPS"
 [[ "$PUBLIC_HOSTNAME" != chronos.example.com ]] || die "PUBLIC_HOSTNAME still contains the example hostname"
+[[ "$CHRONOS_UI_USER" =~ ^[A-Za-z0-9._-]+$ ]] || die "CHRONOS_UI_USER may only contain letters, digits, '.', '_' and '-'"
+# Single quotes keep Compose from expanding the $ signs inside the bcrypt hash.
+[[ "$CHRONOS_UI_PASSWORD_HASH" =~ ^\'\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}\'$ ]] \
+  || die "CHRONOS_UI_PASSWORD_HASH must be a single-quoted bcrypt hash from 'caddy hash-password'"
 
 cd "$DEPLOY_DIR"
 docker compose --env-file "$ENV_FILE" config --quiet

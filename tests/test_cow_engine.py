@@ -1,6 +1,8 @@
+import time
+
 import pytest
 
-from cow_engine import CoWBranchEngine
+from cow_engine import CoWBranchEngine, run_migration
 from pg_support import pg_query, reset_databases, run
 
 CARTRIDGE = "FINTECH_ESCROW"
@@ -97,3 +99,55 @@ def test_double_resolve_raises(dsn):
         with pytest.raises(KeyError):
             await engine.resolve(bid, commit=True)
     with_engine(dsn, scenario)
+
+
+class RecordingConn:
+    """Stands in for the pinned connection: records each statement run_migration would send."""
+
+    def __init__(self):
+        self.sent = []
+
+    async def execute(self, statement):
+        self.sent.append(statement)
+
+
+def migrate(sql):
+    conn = RecordingConn()
+    run(run_migration(conn, {"arguments": {"sql": sql}}))
+    return conn.sent
+
+
+@pytest.mark.parametrize("sql", [
+    "/**/COMMIT",
+    "-- x\nCOMMIT",
+    "-- x\rROLLBACK",
+    "/* outer /* nested */ still a comment */ COMMIT",
+    "  /**/ SET statement_timeout = 0",
+    "DELETE FROM users; /**/COMMIT",
+    "SELECT set_config('statement_timeout', '0', false)",
+    'SELECT "pg_terminate_backend"(42)',
+    "SELECT pg_advisory_lock(1)",
+    r"""SELECT U&"\0073et_config"('lock_timeout', '0', false)""",
+    "SELECT set_config/**/('statement_timeout','0',false)",
+    "SELECT pg_catalog.set_config /* x */ ('lock_timeout','0',false)",
+    "SELECT pg_terminate_backend--x\n(42)",
+    "ALTER ROLE chronos_kernel SET statement_timeout = 0",
+])
+def test_run_migration_rejects_sql_that_escapes_the_shadow_branch(sql):
+    with pytest.raises(PermissionError):
+        migrate(sql)
+
+
+def test_run_migration_guard_is_linear_in_comment_count():
+    # Quadratic scanning took about 1 s per 0.6 MB, blocking the kernel's event loop meanwhile.
+    started = time.perf_counter()
+    assert migrate("/**/" * 500_000 + "SELECT 1") == ["/**/" * 500_000 + "SELECT 1"]
+    assert time.perf_counter() - started < 5.0
+
+
+def test_run_migration_allows_commented_ddl_and_transaction_scoped_calls():
+    sent = migrate(
+        "/* add audit column */ ALTER TABLE users ADD COLUMN last_login_at TEXT; "
+        "SELECT pg_advisory_xact_lock(1); SET LOCAL lock_timeout = '1s'"
+    )
+    assert len(sent) == 3

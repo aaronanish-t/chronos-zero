@@ -1,0 +1,3 @@
+# These scripts run inside Linux containers; CRLF from a Windows checkout makes Postgres init fail
+# half-way, and the persistent volume then skips init on every later start.
+*.sh text eol=lf
